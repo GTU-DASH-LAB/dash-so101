@@ -18,6 +18,7 @@ lerobot-rollout \
   --robot.cameras="{ front: {type: opencv, index_or_path: $CAMERA_INDEX, width: $CAMERA_W, height: $CAMERA_H, fps: $CAMERA_FPS}}" \
   --task="$TASK" \
   --policy.path="$MODEL_REPO" \
-  --policy.device=mps \
+  --policy.device="$POLICY_DEVICE" \
+  --inference.type=rtc \
   --rename_map='{"observation.images.front": "observation.images.camera1"}' \
   --display_data=true
