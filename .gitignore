@@ -16,3 +16,8 @@ __pycache__/
 outputs/
 data/
 wandb/
+
+# SO-Brain runtime captures
+so_brain/last_frame.png
+so_brain/last_plan.png
+point_labels*.json
