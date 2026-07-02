@@ -9,6 +9,9 @@ __pycache__/
 # OS
 .DS_Store
 
+# JetBrains IDE (PyCharm/IntelliJ) project settings
+.idea/
+
 # Claude Code local settings
 .claude/settings.local.json
 
