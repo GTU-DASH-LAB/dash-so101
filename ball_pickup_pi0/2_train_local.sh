@@ -33,6 +33,17 @@ echo "Fine-tuning $BASE_MODEL on $DATASET_REPO"
 echo "  batch_size=$BATCH_SIZE  steps=$STEPS  output=$OUTPUT_DIR"
 echo
 
+# bf16 mixed precision: this is NOT the same as `--policy.use_amp` (that flag
+# is validated but never wired into Accelerate's mixed-precision setting in
+# this lerobot version, so it's a no-op). Accelerate reads this env var
+# instead. On this GB10 (121GB unified CPU+GPU memory), fp32 + BATCH_SIZE=16
+# reliably OOMs; bf16 + BATCH_SIZE=8 is the tested-safe combination — see the
+# comment in config.env before raising BATCH_SIZE.
+export ACCELERATE_MIXED_PRECISION=bf16
+# Reduces the chance of an allocator-fragmentation OOM during the memory-spiky
+# first couple of warmup steps (CUDA kernel autotuning).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 lerobot-train \
   --policy.path="$BASE_MODEL" \
   --dataset.repo_id="$DATASET_REPO" \
@@ -46,6 +57,7 @@ lerobot-train \
   --policy.device=cuda \
   --policy.push_to_hub="$PUSH_MODEL_TO_HUB" \
   --policy.repo_id="$MODEL_REPO" \
+  --rename_map='{"observation.images.top": "observation.images.base_0_rgb", "observation.images.wrist": "observation.images.left_wrist_0_rgb"}' \
   --wandb.enable=false
 
 echo
