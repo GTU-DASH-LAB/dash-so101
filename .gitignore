@@ -19,3 +19,4 @@ __pycache__/
 outputs/
 data/
 wandb/
+watchdog.log
