@@ -17,11 +17,18 @@ PICK_COLOR = (-2.0, 2.0, -2.0)  # "green"
 PLACE_COLOR = (-2.0, -2.0, 2.0)  # "blue"
 
 TASK_POINT_RE = re.compile(r"(pick|place)@([01]?\.\d+),\s*([01]?\.\d+)")
+TASK_EFFORT_RE = re.compile(r"effort@(\d*\.?\d+)")
 
 
 def parse_task_points(task: str) -> dict[str, tuple[float, float]]:
     """Parse "pick@0.43,0.61 place@0.72,0.35" -> {"pick": (u, v), "place": (u, v)}."""
     return {m[0]: (float(m[1]), float(m[2])) for m in TASK_POINT_RE.findall(task)}
+
+
+def parse_task_effort(task: str) -> float | None:
+    """Parse "... effort@0.6" -> 0.6 (grip-effort scale; None when absent)."""
+    m = TASK_EFFORT_RE.search(task)
+    return max(0.3, min(1.3, float(m.group(1)))) if m else None
 
 
 class PointACTPolicy(WMACTPolicy):
@@ -104,9 +111,32 @@ class PointACTPolicy(WMACTPolicy):
             batch[key] = img
         return batch
 
+    def _lookup_effort(self, batch: dict, b: int) -> float | None:
+        if "effort" in batch:
+            return max(0.3, min(1.3, float(batch["effort"][b])))
+        task = batch.get("task")
+        if task is not None:
+            task_str = task[b] if isinstance(task, (list, tuple)) else task
+            return parse_task_effort(str(task_str))
+        return None
+
+    def _apply_effort(self, batch: dict, chunk: Tensor) -> Tensor:
+        """Scale the gripper channel around the chunk's first step (~current opening):
+        g'_t = g_0 + effort * (g_t - g_0). effort<1 closes more gently (fragile objects),
+        effort>1 squeezes deeper than demonstrated (heavy/slippery ones). The transform
+        is affine-invariant, so it is correct in normalized action space too."""
+        idx = self.config.effort_action_index
+        for b in range(chunk.shape[0]):
+            effort = self._lookup_effort(batch, b)
+            if effort is not None and effort != 1.0:
+                ref = chunk[b, 0, idx]
+                chunk[b, :, idx] = ref + effort * (chunk[b, :, idx] - ref)
+        return chunk
+
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         return super().forward(self._draw_markers(batch))
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
-        return super().predict_action_chunk(self._draw_markers(batch))
+        chunk = super().predict_action_chunk(self._draw_markers(batch))
+        return self._apply_effort(batch, chunk)

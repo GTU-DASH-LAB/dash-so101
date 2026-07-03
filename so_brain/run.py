@@ -103,15 +103,30 @@ def main():
         print(f"[attempt {attempt}] pick {goal['object']!r} -> place on {goal['destination']!r}")
 
         # 2. Ground to pixels (re-done every attempt: failed grasps move objects).
-        pick = grounding.locate(image, goal["object"])
+        # The pick marker goes on the *grasp part* (handle/neck/...), not the object center.
+        grasp_target = corrections.get("grasp_phrase") or goal.get("grasp") or goal["object"]
+        try:
+            pick = grounding.locate(image, grasp_target)
+        except LookupError:
+            if grasp_target == goal["object"]:
+                raise
+            print(f"grasp part {grasp_target!r} not found; falling back to the whole object")
+            grasp_target = goal["object"]
+            pick = grounding.locate(image, grasp_target)
+        if grasp_target != goal["object"]:
+            print(f"grasping by: {grasp_target!r}")
         place = grounding.locate(image, goal["destination"])
         if "pick_offset" in corrections:
             du, dv = corrections["pick_offset"]
             pick = (min(1.0, max(0.0, pick[0] + du)), min(1.0, max(0.0, pick[1] + dv)), pick[2])
             print(f"applying diagnosed grasp correction ({du:+.3f}, {dv:+.3f})")
+        effort = corrections.get("effort", goal.get("effort"))
         print(f"pick ({pick[0]:.3f}, {pick[1]:.3f}) score={pick[2]:.2f} | place ({place[0]:.3f}, {place[1]:.3f}) score={place[2]:.2f}")
         save_preview(image, pick, place)
         task = f"pick@{pick[0]:.3f},{pick[1]:.3f} place@{place[0]:.3f},{place[1]:.3f}"
+        if effort is not None:
+            task += f" effort@{effort:.2f}"
+            print(f"grip effort: {effort:.2f} (0.5≈fragile, 0.8≈normal, 1.1≈heavy/slippery)")
         print(f"task string: {task}   (preview: so_brain/last_plan.png)")
 
         if args.dry_run:
@@ -152,7 +167,8 @@ def main():
                 cause = diag["cause"]
                 corrections = {
                     k: diag[k]
-                    for k in ("object_phrase", "destination_phrase", "pick_offset")
+                    for k in ("object_phrase", "destination_phrase", "grasp_phrase",
+                              "pick_offset", "effort")
                     if k in diag
                 }
         print(f"[attempt {attempt}] {outcome}: {note}" + (f" (cause: {cause})" if cause != "none" else ""))
@@ -160,6 +176,8 @@ def main():
             instruction=args.instruction,
             object=goal["object"],
             destination=goal["destination"],
+            grasp=grasp_target,
+            effort=effort,
             pick=[round(pick[0], 3), round(pick[1], 3)],
             place=[round(place[0], 3), round(place[1], 3)],
             outcome=outcome,

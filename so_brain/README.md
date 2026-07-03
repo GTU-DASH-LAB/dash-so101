@@ -123,6 +123,37 @@ markers burned in, so it learns marker-relative behavior.
 ./so_brain/run.sh --object "a pen" --place "a cup" --dry-run      # bypass planner
 ```
 
+## Grasp affordances and grip effort (semantic physics)
+
+Two failure classes the plain pipeline had, and where they're now handled:
+
+**Where to grasp.** A bounding-box center is the wrong grasp for mugs (handle),
+bottles (neck), and tools (handle, not head). The planner now thinks about the grip
+during CoT and emits a `grasp` phrase ("the handle of the mug"); the *grasp part*
+gets grounded for the pick marker, not the object center — with fallback to the whole
+object when the detector can't find the part. This is where the LocateAnything
+backend genuinely outshines OWLv2: "the handle of the red mug" is a referring
+expression, its home turf. The diagnosis loop can also switch grasp part after a
+failure ("slipped from the tip" → `grasp_phrase: "the middle of the pen"`).
+
+**How hard to grip.** The SO-101 gripper is position-controlled — force is how far
+past contact it closes. The planner emits `effort` (0.5 fragile / 0.8 normal /
+1.1 heavy-slippery) from the VLM's material knowledge; it rides the task string as
+`effort@0.6`, and Point-ACT scales its gripper channel around the chunk's own starting
+opening (`g' = g₀ + effort·(g − g₀)` — affine-invariant, so valid in normalized action
+space; arm joints untouched). Crucially the failure loop closes over it: "crushed the
+cup" → lower effort next attempt; "slipped" → higher; the working value persists in
+episodic memory per object.
+
+Honest labels: this is *semantic* physics — priors from the VLM plus corrections from
+experience, not force sensing. Real force feedback needs the gripper's `Present_Load`
+register added to the robot observations and re-recorded demos so the policy can feel
+contact — that's the upgrade path, and it needs hardware-side changes first.
+
+Training-data tip: when recording grasp-critical objects (mugs, tools), pass the part
+phrase to the relabeler (`--pick "the handle of the mug"`) so training markers sit on
+the same parts inference will target.
+
 ## The data recipe that unlocks real zero-shot
 
 With only pen episodes, the policy can cheat: the pen's appearance and the green marker

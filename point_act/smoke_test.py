@@ -88,6 +88,18 @@ def main():
     chunk_c = policy.predict_action_chunk(obs3)
     assert torch.allclose(chunk_a, chunk_c), "task-string points differ from tensor points"
 
+    # Effort scales ONLY the gripper channel, relative to the chunk's first step.
+    from point_act.modeling_pointact import parse_task_effort
+
+    assert parse_task_effort("pick@0.2,0.5 effort@0.6") == 0.6
+    assert parse_task_effort("effort@9") == 1.3 and parse_task_effort("no effort here") is None
+    obs4 = dict(obs3, task=["pick@0.2,0.5 place@0.8,0.5 effort@0.5"])
+    policy.reset()
+    chunk_e = policy.predict_action_chunk(obs4)
+    expected_grip = chunk_c[0, 0, -1] + 0.5 * (chunk_c[0, :, -1] - chunk_c[0, 0, -1])
+    assert torch.allclose(chunk_e[0, :, -1], expected_grip, atol=1e-5), "gripper not effort-scaled"
+    assert torch.allclose(chunk_e[0, :, :-1], chunk_c[0, :, :-1]), "effort leaked into arm joints"
+
     print("smoke test OK:", {k: round(v, 4) for k, v in loss_dict.items()})
 
 

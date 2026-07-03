@@ -19,10 +19,16 @@ MODEL = os.environ.get("SO_BRAIN_LLM_MODEL", "qwen2.5vl:7b")
 SYSTEM = (
     "You control a tabletop robot arm that can do one thing: pick up an object and place it "
     "somewhere. First think briefly (2-4 sentences) inside <think></think> about what the user "
-    "wants and what is visible. Then respond with ONLY a JSON object: "
+    "wants, what is visible, WHERE on the object a parallel gripper should grip it, and how "
+    "much grip effort its material needs. Then respond with ONLY a JSON object: "
     '{"object": "<short noun phrase of the thing to pick up>", '
-    '"destination": "<short noun phrase of where to place it>"}. '
-    "Phrases must be visually descriptive (color/type), suitable for an object detector. "
+    '"destination": "<short noun phrase of where to place it>", '
+    '"grasp": "<detector phrase for the exact part to grip — e.g. \'the handle of the mug\', '
+    "'the neck of the bottle', 'the handle of the screwdriver'; \"\" if the whole object "
+    'grips fine>, '
+    '"effort": <grip effort 0.4-1.2: ~0.5 fragile (paper cup, egg), ~0.8 normal, '
+    "~1.1 heavy or slippery (steel tool, full bottle)>}. "
+    "Phrases must be visually descriptive, suitable for an object detector. "
     'If the instruction is not a pick-and-place request, respond {"error": "<why>"}.'
 )
 
@@ -33,16 +39,20 @@ An object detector's verdict afterwards: {note}.
 
 First think step by step inside <think></think>: compare the photos; did the object reach
 the destination? If not, what is the single most likely cause — the detector found the
-wrong object, the wrong destination, the grasp point was badly placed on the object, the
-motion/policy itself failed, or the scene changed mid-attempt?
+wrong object, the wrong destination, the grasp point was badly placed on the object
+(wrong part: body instead of handle/neck), the grip effort was wrong (crushed it, or it
+slipped from too weak a grip on a heavy/slippery object), the motion/policy itself
+failed, or the scene changed mid-attempt?
 
 Then respond with ONLY a JSON object:
 {{"success": true/false,
  "note": "<one short sentence: what happened / what went wrong>",
- "cause": "grounding_object" | "grounding_destination" | "grasp_point" | "policy" | "scene" | "none",
+ "cause": "grounding_object" | "grounding_destination" | "grasp_point" | "grip_force" | "policy" | "scene" | "none",
  "object_phrase": "<better detector phrase, ONLY if cause is grounding_object>",
  "destination_phrase": "<better phrase, ONLY if cause is grounding_destination>",
- "pick_offset": [du, dv]  <-- ONLY if cause is grasp_point; small correction, each within ±0.08
+ "grasp_phrase": "<part to grip instead, e.g. 'the handle of the mug', ONLY if cause is grasp_point>",
+ "pick_offset": [du, dv],  <-- ONLY if cause is grasp_point and no better part exists; each within ±0.08
+ "effort": <0.4-1.2 corrected grip effort, ONLY if cause is grip_force>
 }}"""
 
 
@@ -92,7 +102,16 @@ def plan(instruction: str, image_path: str | None = None, lessons: str = "") -> 
     )
     if "error" in result:
         raise ValueError(f"planner: {result['error']}")
-    return {"object": result["object"], "destination": result["destination"], "thought": thought}
+    goal = {"object": result["object"], "destination": result["destination"], "thought": thought}
+    if result.get("grasp"):
+        goal["grasp"] = str(result["grasp"])
+    if result.get("effort") is not None:
+        goal["effort"] = _clamp_effort(result["effort"])
+    return goal
+
+
+def _clamp_effort(value) -> float:
+    return max(0.3, min(1.3, float(value)))
 
 
 def diagnose(
@@ -129,11 +148,13 @@ def diagnose(
             "cause": str(result.get("cause", "none")),
             "thought": thought[:300],
         }
-        for key in ("object_phrase", "destination_phrase"):
+        for key in ("object_phrase", "destination_phrase", "grasp_phrase"):
             if result.get(key):
                 diag[key] = str(result[key])
         if isinstance(result.get("pick_offset"), (list, tuple)) and len(result["pick_offset"]) == 2:
             diag["pick_offset"] = [max(-0.08, min(0.08, float(d))) for d in result["pick_offset"]]
+        if result.get("effort") is not None:
+            diag["effort"] = _clamp_effort(result["effort"])
         return diag
     except Exception:  # noqa: BLE001
         return None
@@ -208,17 +229,21 @@ def verify_subgoal(subgoal: str, image_path: str, evidence: str = "") -> dict:
 def _selftest():
     """Offline check of the think-then-JSON parsing (no network, no models)."""
     canned = (
-        "<think>The user wants the pen moved. I can see a white pen on the desk {tricky}.</think>\n"
-        '{"object": "a white pen", "destination": "a black mouse pad"}'
+        "<think>The user wants the mug moved. A parallel gripper should take the handle, "
+        "and ceramic needs normal grip {tricky}.</think>\n"
+        '{"object": "a white mug", "destination": "a black mouse pad", '
+        '"grasp": "the handle of the white mug", "effort": 0.8}'
     )
     result, thought = _extract_json(canned)
-    assert result["object"] == "a white pen" and "tricky" in thought
+    assert result["object"] == "a white mug" and "tricky" in thought
+    assert result["grasp"] == "the handle of the white mug" and result["effort"] == 0.8
+    assert _clamp_effort(9) == 1.3 and _clamp_effort(0.1) == 0.3
 
     diag_reply = (
         "<think>The pen is still at its original spot; the gripper closed on its tip and it "
         "slipped. The grasp point was too far from the center.</think>\n"
         '{"success": false, "note": "pen slipped from a tip grasp", "cause": "grasp_point", '
-        '"pick_offset": [0.2, -0.01]}'
+        '"grasp_phrase": "the middle of the pen", "pick_offset": [0.2, -0.01], "effort": 1.5}'
     )
     import tempfile
 
@@ -236,6 +261,7 @@ def _selftest():
         _chat = real_chat
     assert diag["cause"] == "grasp_point" and "slipped" in diag["thought"]
     assert diag["pick_offset"] == [0.08, -0.01], diag["pick_offset"]  # clamped to ±0.08
+    assert diag["grasp_phrase"] == "the middle of the pen" and diag["effort"] == 1.3
 
     # Nested JSON (decompose) survives think-tag stripping and prose around it.
     nested = (

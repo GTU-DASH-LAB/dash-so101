@@ -16,7 +16,10 @@ class PointACTConfig(WMACTConfig):
             so_brain/relabel.py. Used at training time to draw the markers.
             Missing file is tolerated (inference supplies points directly).
         marker_radius: Marker half-size in pixels (at the training resolution).
+        effort_action_index: Action dim of the gripper (SO-101: last). The
+            "effort@X" task-string hint scales this channel at inference.
     """
 
     point_labels_path: str | None = None
     marker_radius: int = 6
+    effort_action_index: int = -1
