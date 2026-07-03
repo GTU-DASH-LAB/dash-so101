@@ -155,9 +155,16 @@ def main():
 
                 success, step, k, sub_steps, retried = False, 0, 0, 0, False
                 fail_note = ""
+                supports_effort = hasattr(cfg, "effort_action_index")
                 while step < max_steps and not success:
                     sub = subgoals[min(k, len(subgoals) - 1)]
-                    obs["task"] = [sub["instruction"]]
+                    instruction_k = sub["instruction"]
+                    if retried and sub.get("grasp"):
+                        # the plain phrasing already failed once — steer the grasp via language
+                        instruction_k = f"{instruction_k}, gripping it by {sub['grasp']}"
+                    obs["task"] = [instruction_k]
+                    if supports_effort and sub.get("effort") is not None:
+                        obs["effort"] = torch.tensor([float(sub["effort"])])
                     batch = pre(obs)
                     with torch.inference_mode():
                         action = post(policy.select_action(batch))

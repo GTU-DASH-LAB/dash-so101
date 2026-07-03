@@ -142,6 +142,24 @@ neither helps when an atomic skill itself is broken — that residual is what th
 scorer's best-of-N attacks. Caveat for the diary: memory-on runs are a *lifelong*
 protocol, not comparable to single-episode published numbers — report both.
 
+## Grasp affordances and grip effort in pi-WM
+
+Same semantics as the real-robot stack (see `so_brain/README.md`), adapted to a
+language-conditioned policy:
+
+- **Effort**: `batch["effort"]` (preferred; the hierarchical harness sets it from the
+  decompose plan) or an `effort@X` task tag — which the policy parses and **strips
+  before pi0.5's tokenizer sees the text**, so the language input stays in
+  distribution. The selected chunk's gripper channel is scaled around its first step
+  (`g' = g₀ + effort·(g − g₀)`); candidates are scored *unscaled* so the scorer stays
+  in the demo distribution. Honest note: LIBERO's sim gripper is forgiving — expect
+  effort to matter mostly when pi-WM runs on real hardware, not in the benchmark.
+- **Grasp part**: pi0.5 takes no points, so the grasp phrase steers through
+  *language*: when a grasp sub-goal fails once, the retry is rephrased with the
+  decompose plan's grasp hint ("…, gripping it by the handle of the frying pan").
+  First attempts keep training-distribution phrasing; only retries deviate — the
+  plain phrasing already failed, so the OOD risk is worth it.
+
 ## Upgrade paths, in order of expected value
 
 1. **Bigger N + temperature on the noise** — pure compute, zero code.

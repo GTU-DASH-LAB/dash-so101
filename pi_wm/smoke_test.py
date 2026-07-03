@@ -8,7 +8,7 @@ import tempfile
 
 import torch
 
-from pi_wm.modeling_piwm import pick_best
+from pi_wm.modeling_piwm import apply_effort, extract_effort_and_clean, pick_best
 from pi_wm.scorer import WorldModelScorer, jepa_progress_losses
 
 
@@ -45,6 +45,24 @@ def main():
     scores = torch.tensor([[0.1, 0.9, 0.2, 0.3], [0.5, 0.1, 0.8, 0.2]])
     best = pick_best(chunks, scores, k)
     assert best[0, 0, 0] == 1.0 and best[1, 0, 0] == 6.0, best[:, 0, 0]
+
+    # Effort: task-string tags are parsed AND stripped (pi0.5 must never read them);
+    # an explicit batch key wins; scaling touches only the gripper channel.
+    batch = {"task": ["put the mug on the shelf effort@0.5", "open the drawer"]}
+    cleaned, efforts = extract_effort_and_clean(batch)
+    assert cleaned["task"] == ["put the mug on the shelf", "open the drawer"]
+    assert efforts == [0.5, None]
+    cleaned2, efforts2 = extract_effort_and_clean(
+        {"task": ["x effort@0.5"], "effort": torch.tensor([1.1])}
+    )
+    assert abs(efforts2[0] - 1.1) < 1e-6 and "effort" not in cleaned2 and cleaned2["task"] == ["x"]
+
+    chunk = torch.ones(2, t, d)
+    chunk[:, 0, -1] = 0.0  # first-step gripper = reference opening
+    scaled = apply_effort(chunk.clone(), [0.5, None], -1)
+    assert torch.allclose(scaled[0, 1:, -1], torch.full((t - 1,), 0.5)), "gripper not scaled"
+    assert torch.allclose(scaled[1], chunk[1]), "None effort must not change anything"
+    assert torch.allclose(scaled[0, :, :-1], chunk[0, :, :-1]), "effort leaked into arm joints"
 
     # Save/load round trip.
     with tempfile.NamedTemporaryFile(suffix=".pt") as f:

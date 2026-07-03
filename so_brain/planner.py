@@ -189,7 +189,9 @@ commands completes the long instruction? Keep each command in the training phras
 Then respond with ONLY a JSON object:
 {{"subgoals": [{{"instruction": "<atomic command>",
                 "object": "<detector phrase for the object moved>",
-                "destination": "<detector phrase for where it ends up, or \\"\\">"}}, ...]}}"""
+                "destination": "<detector phrase for where it ends up, or \\"\\">",
+                "grasp": "<part to grip if non-obvious (handle/neck/rim), else \\"\\">",
+                "effort": <grip effort 0.4-1.2, or null for default>}}, ...]}}"""
 
 VERIFY_PROMPT = """Photo of a robot workspace. Has this command been FULLY completed:
 {subgoal!r}?
@@ -210,7 +212,8 @@ def decompose(instruction: str, image_path: str | None = None, lessons: str = ""
     if not subgoals:
         raise ValueError(f"decompose returned no subgoals: {result}")
     for s in subgoals:
-        s.setdefault("object", ""), s.setdefault("destination", "")
+        s.setdefault("object", ""), s.setdefault("destination", ""), s.setdefault("grasp", "")
+        s["effort"] = _clamp_effort(s["effort"]) if s.get("effort") is not None else None
     if thought:
         print(f"decompose thinking: {thought[:300]}")
     return subgoals
@@ -269,11 +272,13 @@ def _selftest():
         "Here is the plan:\n"
         '{"subgoals": [{"instruction": "pick up the alphabet soup and place it in the basket", '
         '"object": "alphabet soup can", "destination": "basket"}, '
-        '{"instruction": "pick up the tomato sauce and place it in the basket", '
-        '"object": "tomato sauce can", "destination": "basket"}]}'
+        '{"instruction": "pick up the frying pan and place it on the stove", '
+        '"object": "frying pan", "destination": "stove", "grasp": "the handle of the frying pan", '
+        '"effort": 1.1}]}'
     )
     result, thought = _extract_json(nested)
     assert len(result["subgoals"]) == 2 and "order matters" in thought
+    assert result["subgoals"][1]["grasp"] == "the handle of the frying pan"
     print("planner self-test OK")
 
 
