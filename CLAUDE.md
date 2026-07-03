@@ -17,8 +17,8 @@ Learning/experiments with the **SO-101** robotic arms and Vision-Language-Action
 - `ball_pickup_pi0/` — fine-tune **pi0** (full fine-tune) on SO-101 demos of "pick
   up the ball and place it in the white cup", recorded + trained + run entirely on
   this machine.
-- `cap_cup_sort_pi0/` — fine-tune **pi0 via LoRA** on SO-101 demos of "pick up the
-  pink bottle cap and purple cups, ignore other-colored cups, place in the pink
+- `cap_sort_pi0/` — fine-tune **pi0 via LoRA** on SO-101 demos of "from a cluster of
+  colored bottle caps, pick up only the purple ones and place them in the pink
   bowl". Camera config keys are pi0's own names directly (`base_0_rgb`/
   `left_wrist_0_rgb`), not `top`/`wrist` — no `--rename_map` needed anywhere in
   this folder's scripts, unlike `ball_pickup_pi0`.
@@ -175,7 +175,7 @@ is the single source of truth — in particular the cameras block must be
 - Untested against real hardware as of the commit that added it — first run
   needs the same care as any new control script (hand near the power switch).
 
-### `cap_cup_sort_pi0` — LoRA fine-tuning
+### `cap_sort_pi0` — LoRA fine-tuning
 
 - **`--policy.use_peft` does NOT turn on LoRA training** — that flag is only
   for loading an *existing* PEFT adapter checkpoint on resume/inference
@@ -196,7 +196,7 @@ is the single source of truth — in particular the cameras block must be
 - At inference/rollout time, a LoRA checkpoint needs `--policy.use_peft=true`
   passed to `lerobot-rollout` (this time it *is* the right flag — you're
   loading an existing adapter, matching the branch above). Already wired into
-  `cap_cup_sort_pi0/3_run_autonomous.sh`.
+  `cap_sort_pi0/3_run_autonomous.sh`.
 - Verified 2026-07-03 with a real 10-step smoke test (reusing
   `ball_pickup_pi0`'s already-recorded dataset purely to validate PEFT
   mechanics/memory, not for anything task-related): `num_learnable_params`

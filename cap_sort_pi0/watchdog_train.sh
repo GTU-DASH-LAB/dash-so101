@@ -50,7 +50,7 @@ run_training() {
       --steps="$STEPS" \
       --save_freq="$SAVE_FREQ" \
       --output_dir="$OUTPUT_DIR" \
-      --job_name=pi0_cap_cup_sort \
+      --job_name=pi0_cap_sort \
       --policy.device=cuda \
       --policy.push_to_hub="$PUSH_MODEL_TO_HUB" \
       --policy.repo_id="$MODEL_REPO" \
@@ -65,7 +65,7 @@ run_training() {
 # run -- these can otherwise hold tens of GB and cause an avoidable OOM on
 # the very next retry (see CLAUDE.md: "orphaned dataloader worker processes").
 cleanup_orphans() {
-  pkill -9 -f "lerobot-train.*job_name=pi0_cap_cup_sort" 2>/dev/null || true
+  pkill -9 -f "lerobot-train.*job_name=pi0_cap_sort" 2>/dev/null || true
   sleep 3
 }
 

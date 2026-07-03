@@ -1,8 +1,8 @@
-# cap_cup_sort_pi0
+# cap_sort_pi0
 
-Fine-tune **pi0** on your own SO-101 demonstrations of *"pick up the pink bottle cap
-and the purple cups (ignoring cups of other colors), and place them in the pink bowl"*
-— recorded, trained (via **LoRA** this time), and run entirely on **this machine**.
+Fine-tune **pi0** on your own SO-101 demonstrations of *"from a cluster of colored
+bottle caps, pick up only the purple ones and place them in the pink bowl"* —
+recorded, trained (via **LoRA** this time), and run entirely on **this machine**.
 
 ## Pipeline
 
@@ -33,10 +33,18 @@ truth shared by recording and running, so the policy always sees what it was tra
   loading it without that flag fails.
 - **40 demos, not 15.** `ball_pickup_pi0`'s first policy underfit/undertrained, plausibly
   in part from too little data for the task's difficulty. This task is also harder: it
-  needs **color discrimination** (purple cups yes, other-colored cups no), which needs
+  needs **color discrimination** (purple caps yes, everything else no), which needs
   negative examples, not just positive ones — see recording tips below.
 - **STEPS=20000** (vs. `ball_pickup_pi0`'s 10000) — explicitly requested, and reasonable
   given more demos and a harder task.
+
+## The scene
+
+A cluster of small round caps sits on the table: 2 **purple** ones (the ones to pick)
+plus green/blue/orange distractor caps (to ignore), next to a pink bowl (the target
+container). Clear any unrelated clutter (a tennis ball / marker pen ended up in frame
+in an earlier check) out of both camera views before recording — anything visible
+becomes potential "signal" the policy might latch onto.
 
 ## Before you start
 
@@ -73,21 +81,23 @@ the local copy.
 
 ## Recording tips (for good demos)
 
-- **Include distractor cups of other colors in most episodes.** The model needs to see
-  "here are 3 cups, only the purple one gets picked" repeatedly to learn the color
-  discrimination — episodes with only purple cups and no distractors don't teach it what
+- **Always keep the non-purple caps on the table as distractors.** The model needs to
+  see "here are 4 caps, only the 2 purple ones get picked" repeatedly to learn the
+  color discrimination — episodes with only purple caps present don't teach it what
   to *avoid*.
-- Vary: cap-only episodes, purple-cups-only episodes, and mixed episodes (cap + purple
-  cups + distractor cups together).
-- Vary cup/cap position and the number/arrangement of distractor cups between episodes.
+- Vary the cluster's layout and cap positions between episodes; occasionally vary which
+  non-purple caps are present too, so the model generalizes "not purple" rather than
+  memorizing specific distractor caps.
 - Do the *whole* motion each time: approach → grasp → lift → move over bowl → release.
+  With 2 purple caps present, record both being picked (one after the other) within
+  the same episode when natural, so the policy learns to keep going until both are done.
 - Use the arrow keys (see `1_record.sh` header) to redo a bad take.
 
 ## Notes
 
-- Dataset is stored locally at `~/.cache/huggingface/lerobot/<user>/so101_cap_cup_sort`
+- Dataset is stored locally at `~/.cache/huggingface/lerobot/<user>/so101_cap_sort`
   and training reads it directly from there (the Hub copy is a publish, not the
   source of truth for training).
 - If the trained policy still struggles with color discrimination after 20000 steps,
-  the likely fix is more demos with more distractor-cup variety, not more steps —
-  the model can't learn a distinction it was never shown negative examples of.
+  the likely fix is more demos with more distractor variety, not more steps — the
+  model can't learn a distinction it was never shown negative examples of.

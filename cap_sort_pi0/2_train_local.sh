@@ -64,7 +64,7 @@ lerobot-train \
   --steps="$STEPS" \
   --save_freq="$SAVE_FREQ" \
   --output_dir="$OUTPUT_DIR" \
-  --job_name=pi0_cap_cup_sort \
+  --job_name=pi0_cap_sort \
   --policy.device=cuda \
   --policy.push_to_hub="$PUSH_MODEL_TO_HUB" \
   --policy.repo_id="$MODEL_REPO" \

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Stage 1 — record teleoperated demonstrations of "cap/purple cups -> pink bowl".
+# Stage 1 — record teleoperated demonstrations of "purple caps -> pink bowl".
 # You move the LEADER arm; the FOLLOWER mirrors it and everything
 # (joint states + BOTH cameras) is recorded into a dataset.
 #
