@@ -14,8 +14,14 @@ Learning/experiments with the **SO-101** robotic arms and Vision-Language-Action
 - `lerobot/` — LeRobot library, a **git submodule** (upstream HF repo). Don't edit
   files here as if they were ours; changes belong upstream. Bump the submodule
   pointer deliberately (see below), not as an accidental side effect.
-- `ball_pickup_pi0/` — fine-tune **pi0** on SO-101 demos of "pick up the ball and
-  place it in the white cup", recorded + trained + run entirely on this machine.
+- `ball_pickup_pi0/` — fine-tune **pi0** (full fine-tune) on SO-101 demos of "pick
+  up the ball and place it in the white cup", recorded + trained + run entirely on
+  this machine.
+- `cap_cup_sort_pi0/` — fine-tune **pi0 via LoRA** on SO-101 demos of "pick up the
+  pink bottle cap and purple cups, ignore other-colored cups, place in the pink
+  bowl". Camera config keys are pi0's own names directly (`base_0_rgb`/
+  `left_wrist_0_rgb`), not `top`/`wrist` — no `--rename_map` needed anywhere in
+  this folder's scripts, unlike `ball_pickup_pi0`.
 - `pencil_pickup_vla/` — earlier task: SmolVLA fine-tuned on Kaggle for pencil
   pickup.
 - `daily_progress/` — dated diary (`day1.md`, `day2.md`, …), English + Türkçe.
@@ -168,3 +174,36 @@ is the single source of truth — in particular the cameras block must be
   `lerobot.rollout.context.build_rollout_context`.
 - Untested against real hardware as of the commit that added it — first run
   needs the same care as any new control script (hand near the power switch).
+
+### `cap_cup_sort_pi0` — LoRA fine-tuning
+
+- **`--policy.use_peft` does NOT turn on LoRA training** — that flag is only
+  for loading an *existing* PEFT adapter checkpoint on resume/inference
+  (`lerobot/policies/factory.py`'s `cfg.pretrained_path and cfg.use_peft`
+  branch calls `PeftConfig.from_pretrained(...)`, which fails on a plain base
+  checkpoint like `lerobot/pi0_base` since it has no adapter config to find).
+  The actual gate for a **fresh** LoRA run is the top-level `--peft.*` flag
+  group (`lerobot_train.py`: `if cfg.peft is not None: policy.wrap_with_peft(...)`),
+  e.g. `--peft.method_type=LORA --peft.r=16 --peft.lora_alpha=32`. Passing any
+  `--peft.X` flag is what makes `cfg.peft` non-`None` — confirmed by parsing
+  `TrainPipelineConfig` directly and checking `cfg.peft`.
+- `target_modules` doesn't need to be set explicitly — pi0 provides its own
+  default via `PI0Policy._get_default_peft_targets()` (gemma-expert attention
+  q/v projections + the action/state projection layers).
+- The `peft` pip package is **not** part of `lerobot[feetech]`'s install
+  extras — `ModuleNotFoundError: peft` the first time `--peft.*` flags are
+  used. Fix: `pip install peft` (already done in this venv).
+- At inference/rollout time, a LoRA checkpoint needs `--policy.use_peft=true`
+  passed to `lerobot-rollout` (this time it *is* the right flag — you're
+  loading an existing adapter, matching the branch above). Already wired into
+  `cap_cup_sort_pi0/3_run_autonomous.sh`.
+- Verified 2026-07-03 with a real 10-step smoke test (reusing
+  `ball_pickup_pi0`'s already-recorded dataset purely to validate PEFT
+  mechanics/memory, not for anything task-related): `num_learnable_params`
+  drops from 4,028,019,472 (full fine-tune) to 1,385,984 (~0.03%) with
+  `r=16`. At `batch_size=16`, bf16, steady state was ~59GB (script-reported)
+  / ~88GB system-wide peak (~35GB headroom of 121GB) at ~4.4s/step, 4
+  samples/sec — 2x the throughput of `ball_pickup_pi0`'s full-fine-tune
+  `batch_size=8` (~2 samples/sec) at essentially the same per-step wall-clock
+  time. Memory dropped fully back to baseline after the process exited —
+  clean, no orphaned workers observed in this test.
