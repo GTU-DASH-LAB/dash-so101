@@ -10,7 +10,8 @@ the white cup"* — recorded, trained, and run entirely on **this machine** (no 
 | 0 | `find_camera.sh` | List cameras to confirm the `top` (/dev/video0) and `wrist` (/dev/video2) indices. |
 | 1 | `1_record.sh` | Teleoperate (move leader, follower mirrors) and record **15** demos with both cameras. |
 | 2 | `2_train_local.sh` | Fine-tune `lerobot/pi0_base` locally on the GPU. |
-| 3 | `3_run_autonomous.sh` | Run your trained policy on the real arm. |
+| 3 | `3_run_autonomous.sh` | Run your trained policy on the real arm, one-shot CLI (reloads the policy every invocation, ~90s). |
+| 4 | `4_run_ui.sh` | Same as step 3, but persistent: loads the policy once and serves a local web dashboard (`http://localhost:8420`) with live camera views and Start/Pause/Complete/Manual-jog/Reset controls. Use this if you're iterating and don't want to pay the reload cost every restart. |
 
 All settings live in **`config.env`** — the cameras block there is the single source of
 truth shared by recording and running, so the policy always sees what it was trained on.

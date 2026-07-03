@@ -95,6 +95,14 @@ is the single source of truth — in particular the cameras block must be
   rename_map is given). The missing third slot (`right_wrist_0_rgb`) is fine —
   pi0 masks out declared-but-absent image keys internally. Already wired into
   `2_train_local.sh` as `--rename_map='{"observation.images.top": "observation.images.base_0_rgb", "observation.images.wrist": "observation.images.left_wrist_0_rgb"}'`.
+- **`3_run_autonomous.sh` needs that exact same `--rename_map` too** — a
+  fine-tuned checkpoint's `input_features` keep the base model's original
+  `base_0_rgb`/`left_wrist_0_rgb`/`right_wrist_0_rgb` names permanently;
+  `rename_map` only remaps the *dataset's* columns at training time, it doesn't
+  rename the model's own feature slots. Without it, `lerobot-rollout` raises
+  `Visual feature mismatch between policy and robot hardware`. Already wired in.
+- `3_run_autonomous.sh`'s `POLICY_SOURCE` (`local`/`hub` in `config.env`) picks
+  between the newest local checkpoint and downloading `$MODEL_REPO` from the Hub.
 - `nvidia-smi` memory queries return `N/A` on this chip (unified memory, not a
   discrete-VRAM GPU) — track memory via `free -h` instead.
 - **A crashed/killed `lerobot-train` can leave orphaned dataloader worker
@@ -118,3 +126,45 @@ is the single source of truth — in particular the cameras block must be
 - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (also wired in) reduces
   fragmentation-related OOM risk given how close to the memory ceiling training
   already runs.
+
+### `4_run_ui.sh` / `ui/server.py` — persistent inference dashboard
+
+- Built to avoid `3_run_autonomous.sh`'s ~90s policy-reload cost on every
+  restart: FastAPI server loads pi0 and connects the robot/cameras ONCE at
+  startup, then serves a web UI (`ui/static/index.html`) with live MJPEG
+  camera streams and Start/Pause/Complete/Manual/Reset controls, polling
+  `/status` every 500ms.
+- Sidesteps `--rename_map` entirely (unlike the bash scripts) by naming the
+  robot's camera config keys directly as `base_0_rgb`/`left_wrist_0_rgb` —
+  matching pi0's declared schema — instead of `top`/`wrist` + a remap. Same
+  physical cameras/indices/rotation as `config.env`'s `CAMERAS`, just
+  relabeled.
+- **Autonomous mode uses lerobot's real `RTCInferenceEngine`** (from
+  `lerobot.rollout.inference.rtc`), not a hand-rolled `select_action()` loop —
+  same class `3_run_autonomous.sh`'s `--inference.type=rtc` drives, so motion
+  matches the CLI exactly (same model computation, same chunk smoothing). The
+  engine's own `pause()`/`resume()`/`reset()` hooks (its docstring literally
+  says "call pause/resume around human-intervention phases") map directly
+  onto the UI's mode-switching — no separate approximation needed. Feed it
+  the **raw** `robot.get_observation()` dict via `notify_observation()`; it
+  runs its own preprocessing internally (`build_dataset_frame` +
+  `prepare_observation_for_inference` + the real preprocessor pipeline) and
+  its queue already holds **post-processed** actions, so don't call
+  `postprocess()` again on what `get_action()` returns.
+- After enough consecutive inference errors, the RTC background thread exits
+  entirely (see `rtc.py`) — `reset()`/`resume()` alone can't revive it, only
+  `stop()` + `start()` spins up a fresh thread. The control loop checks
+  `rtc_engine.failed` and does this automatically, auto-pausing afterward.
+- `3_run_autonomous.sh` currently sets no `--robot.max_relative_target` (RTC's
+  own smoothing is the only thing shaping autonomous motion), so the UI
+  matches that — no clamp in `SOFollowerRobotConfig` either. Manual jog and
+  Reset-to-home are UI-only features with no CLI equivalent to match, so they
+  keep their own independent rate limiting (`MANUAL_STEP_MAX_DEG`, applied in
+  `step_toward()` before every `send_action()` call in those modes only).
+- "Reset" does NOT target a hardcoded pose (guessing one could crash the arm
+  into something). It captures whatever position the arm is in when the
+  server starts (you position it safely before launching) as `home_pose`,
+  mirroring the same `initial_position` pattern already used in
+  `lerobot.rollout.context.build_rollout_context`.
+- Untested against real hardware as of the commit that added it — first run
+  needs the same care as any new control script (hand near the power switch).
