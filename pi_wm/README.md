@@ -160,6 +160,43 @@ language-conditioned policy:
   First attempts keep training-distribution phrasing; only retries deviate — the
   plain phrasing already failed, so the OOD risk is worth it.
 
+## The committee — "Pragmatic Chaos" for manipulation (committee.py)
+
+The Netflix Prize ensemble won by *blending* predictions — and Netflix never
+deployed it (engineering cost beat the gain). Two lessons carried into
+[committee.py](committee.py):
+
+1. **Select, don't average.** Ratings are scalars, errors cancel; actions are
+   multimodal — the mean of "around the left" and "around the right" hits the
+   obstacle. So the committee is heterogeneous best-of-N: every member policy
+   (pi0.5, MolmoAct2, VLA-JEPA, … any LeRobot-loadable checkpoint fine-tuned on the
+   benchmark) proposes chunks; a sanity filter vetoes degenerate ones (the "IK
+   reflex" — bounds/finiteness in action space; on the real SO-101, lerobot's
+   `RobotKinematics` FK adds workspace checks); ONE env-space world-model judge
+   (`train_scorer.py --env-space`) picks the winner. Errors decorrelate across
+   architectures exactly as in Netflix — via argmax instead of averaging.
+2. **Measure whether the ensemble pays.** K members cost K inferences. The printed
+   per-member pick tally is the committee's "blend weights" — a member that never
+   wins gets dropped.
+
+```bash
+python pi_wm/train_scorer.py --env-space --out outputs/scorer_env.pt   # judge in env action space
+python pi_wm/committee.py --member pi_wm_checkpoint:8 --member <other_ft_checkpoint>:4 \
+    --scorer outputs/scorer_env.pt --suite libero_object --n-episodes 10
+```
+
+Weight-merging across architectures is impossible (no shared parameter space between
+a PaliGemma and a Qwen backbone); the true "all models in one" is **distillation** —
+train one student on the committee's selected outputs — worthwhile only after the
+tally proves the committee actually beats its best member.
+
+The full "merge everything" picture, for the record — each part already exists here,
+composed rather than fused: LLM/VLM reasoning = the CoT planner/diagnoser; grounding
+= OWLv2/LocateAnything; action generation = the committee; physics judgment = the
+world-model scorer; kinematics = the reflex filter (+ FK/IK primitives on the real
+arm); learning from failure = episodic memory. Composition is what today's evidence
+supports; distillation into one network is the research step after.
+
 ## Upgrade paths, in order of expected value
 
 1. **Bigger N + temperature on the noise** — pure compute, zero code.

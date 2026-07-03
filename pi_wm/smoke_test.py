@@ -8,6 +8,7 @@ import tempfile
 
 import torch
 
+from pi_wm.committee import chunk_is_sane, fit_chunk
 from pi_wm.modeling_piwm import apply_effort, extract_effort_and_clean, pick_best
 from pi_wm.scorer import WorldModelScorer, jepa_progress_losses
 
@@ -69,6 +70,16 @@ def main():
         scorer.save(f.name)
         loaded = WorldModelScorer.load(f.name)
         assert loaded.chunk_size == t and loaded.action_dim == d
+
+    # Committee helpers: the reflex veto and mixed-horizon chunk fitting.
+    assert chunk_is_sane(torch.rand(t, d) * 2 - 1)
+    assert not chunk_is_sane(torch.full((t, d), 5.0)), "out-of-bounds chunk passed the veto"
+    bad = torch.rand(t, d)
+    bad[3, 2] = float("nan")
+    assert not chunk_is_sane(bad), "NaN chunk passed the veto"
+    short, long_ = torch.rand(t - 20, d), torch.rand(t + 30, d)
+    assert fit_chunk(short, t).shape == (t, d) and torch.equal(fit_chunk(short, t)[-1], short[-1])
+    assert fit_chunk(long_, t).shape == (t, d) and torch.equal(fit_chunk(long_, t), long_[:t])
 
     n_params = sum(p.numel() for p in scorer.parameters() if p.requires_grad)
     print(f"smoke test OK (scorer: {n_params / 1e6:.1f}M trainable params)")

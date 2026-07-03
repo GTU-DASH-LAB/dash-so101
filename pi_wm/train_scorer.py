@@ -50,7 +50,12 @@ class ScorerDataset(Dataset):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pi05-path", required=True, help="local pi_wm checkpoint dir (make_checkpoint.py)")
+    parser.add_argument("--pi05-path", help="local pi_wm checkpoint dir; required unless --env-space")
+    parser.add_argument(
+        "--env-space", action="store_true",
+        help="train on raw dataset images/actions (no pi05 pipeline) — the judge for committee.py",
+    )
+    parser.add_argument("--chunk-size", type=int, default=50, help="only used with --env-space")
     parser.add_argument("--repo-id", default="HuggingFaceVLA/libero")
     parser.add_argument("--image-key", default="observation.images.image")
     parser.add_argument("--action-dim", type=int, default=7)
@@ -63,10 +68,14 @@ def main():
     parser.add_argument("--out", default="outputs/scorer_libero.pt")
     args = parser.parse_args()
 
-    cfg = PreTrainedConfig.from_pretrained(args.pi05_path)
-    cfg.device = args.device
-    pre, _ = make_pre_post_processors(cfg, pretrained_path=args.pi05_path)
-    chunk = cfg.chunk_size
+    if args.env_space:
+        pre, chunk = None, args.chunk_size
+    else:
+        assert args.pi05_path, "--pi05-path is required unless --env-space is set"
+        cfg = PreTrainedConfig.from_pretrained(args.pi05_path)
+        cfg.device = args.device
+        pre, _ = make_pre_post_processors(cfg, pretrained_path=args.pi05_path)
+        chunk = cfg.chunk_size
 
     ds = LeRobotDataset(
         args.repo_id,
@@ -86,15 +95,22 @@ def main():
     while step < args.steps:
         for batch in loader:
             future_raw = batch.pop("future_image")
-            processed = pre(batch)
-            # second pass so the future frame gets the identical image pipeline
-            processed_future = pre({**batch, args.image_key: future_raw})
+            if pre is None:  # env-space: raw images (0-1 CHW) and raw env actions
+                image = batch[args.image_key].to(args.device)
+                future = future_raw.to(args.device)
+                actions = batch["action"].to(args.device)
+            else:
+                processed = pre(batch)
+                # second pass so the future frame gets the identical image pipeline
+                image = processed[args.image_key]
+                future = pre({**batch, args.image_key: future_raw})[args.image_key]
+                actions = processed["action"]
 
             loss, parts = jepa_progress_losses(
                 scorer,
-                processed[args.image_key],
-                processed_future[args.image_key],
-                processed["action"],
+                image,
+                future,
+                actions,
                 batch["progress_now"].to(args.device),
                 batch["progress_future"].to(args.device),
             )
