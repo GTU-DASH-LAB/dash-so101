@@ -49,7 +49,9 @@ class Memory:
         """Formatted for the planner prompt; empty string when there is nothing to learn."""
         lines = [
             f"- {e['ts']}: tried to pick {e.get('object')!r} -> place on {e.get('destination')!r}; "
-            f"outcome: {e.get('outcome')}. {e.get('note', '')}".strip()
+            f"outcome: {e.get('outcome')}"
+            + (f" (cause: {e['cause']})" if e.get("cause") not in (None, "none") else "")
+            + f". {e.get('note', '')}".rstrip()
             for e in self.recall(phrase, k)
         ]
         return "\n".join(lines)

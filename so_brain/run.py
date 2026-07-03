@@ -77,6 +77,7 @@ def main():
 
     env = os.environ
     memory = Memory()
+    corrections: dict = {}  # CoT diagnosis of the previous attempt -> concrete changes
 
     def grab(path):
         return capture_frame(int(env["CAMERA_INDEX"]), int(env["CAMERA_W"]), int(env["CAMERA_H"]), path)
@@ -94,11 +95,20 @@ def main():
             goal = planner.naive_plan(args.instruction)
         else:
             goal = planner.plan(args.instruction, image_path=image, lessons=lessons)
+            if goal.get("thought"):
+                print(f"planner thinking: {goal['thought']}")
+            # Apply the previous attempt's diagnosis (never overrides explicit flags).
+            goal["object"] = corrections.get("object_phrase", goal["object"])
+            goal["destination"] = corrections.get("destination_phrase", goal["destination"])
         print(f"[attempt {attempt}] pick {goal['object']!r} -> place on {goal['destination']!r}")
 
         # 2. Ground to pixels (re-done every attempt: failed grasps move objects).
         pick = grounding.locate(image, goal["object"])
         place = grounding.locate(image, goal["destination"])
+        if "pick_offset" in corrections:
+            du, dv = corrections["pick_offset"]
+            pick = (min(1.0, max(0.0, pick[0] + du)), min(1.0, max(0.0, pick[1] + dv)), pick[2])
+            print(f"applying diagnosed grasp correction ({du:+.3f}, {dv:+.3f})")
         print(f"pick ({pick[0]:.3f}, {pick[1]:.3f}) score={pick[2]:.2f} | place ({place[0]:.3f}, {place[1]:.3f}) score={place[2]:.2f}")
         save_preview(image, pick, place)
         task = f"pick@{pick[0]:.3f},{pick[1]:.3f} place@{place[0]:.3f},{place[1]:.3f}"
@@ -127,15 +137,25 @@ def main():
         ]
         subprocess.run(cmd, check=True)
 
-        # 4. Verify, explain, remember.
+        # 4. Verify, think about what went wrong, remember.
         after = grab("so_brain/last_after.png")
         outcome, note = verify(after, goal["object"], place)
+        cause = "none"
+        corrections = {}
         if not args.no_llm:
-            pm = planner.postmortem(args.instruction or task, image, after)
-            if pm:
-                outcome = "success" if pm["success"] and outcome != "fail" else outcome
-                note = f"{note}; VLM: {pm['note']}"
-        print(f"[attempt {attempt}] {outcome}: {note}")
+            diag = planner.diagnose(args.instruction or task, image, after, pick, place, note)
+            if diag:
+                if diag["thought"]:
+                    print(f"diagnosis thinking: {diag['thought']}")
+                outcome = "success" if diag["success"] and outcome != "fail" else outcome
+                note = f"{note}; VLM: {diag['note']}"
+                cause = diag["cause"]
+                corrections = {
+                    k: diag[k]
+                    for k in ("object_phrase", "destination_phrase", "pick_offset")
+                    if k in diag
+                }
+        print(f"[attempt {attempt}] {outcome}: {note}" + (f" (cause: {cause})" if cause != "none" else ""))
         memory.log(
             instruction=args.instruction,
             object=goal["object"],
@@ -144,10 +164,13 @@ def main():
             place=[round(place[0], 3), round(place[1], 3)],
             outcome=outcome,
             note=note,
+            cause=cause,
             attempt=attempt,
         )
         if outcome == "success":
             return
+        if corrections:
+            print(f"next attempt will apply: {corrections}")
         print("retrying with a fresh look at the scene..." if attempt < args.attempts else "giving up.")
 
 

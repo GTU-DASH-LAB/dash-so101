@@ -74,13 +74,25 @@ Two tools now use that at runtime:
 1. execute for `--duration` seconds via `lerobot-rollout`
 2. **verify**: the grounder re-detects the object — is it within tolerance of the
    place point? (objective, no VLM needed)
-3. **postmortem**: the VLM compares before/after photos and writes one sentence on
-   what went wrong (best-effort, skipped with `--no-llm`)
-4. **remember**: everything is appended to `episodic_memory.jsonl` — persistent
-   across sessions
-5. **retry**: the scene is re-captured and re-grounded (a failed grasp moves the
+3. **diagnose (lightweight CoT)**: the VLM thinks step-by-step inside
+   `<think></think>` (capped at ~700 tokens — a few sentences, not an essay) over the
+   before/after photos, the grasp/place points, and the detector verdict, then emits a
+   structured diagnosis: `cause ∈ {grounding_object, grounding_destination,
+   grasp_point, policy, scene}` plus a concrete correction (best-effort, skipped with
+   `--no-llm`)
+4. **act on the thinking**: the diagnosis changes the next attempt — a better
+   detector phrase if the wrong object was found, a small grasp-point offset
+   (clamped to ±0.08) if the grip was off-center, plain re-ground otherwise
+5. **remember**: outcome, cause, and note are appended to `episodic_memory.jsonl` —
+   persistent across sessions
+6. **retry**: the scene is re-captured and re-grounded (a failed grasp moves the
    object — recovery *requires* fresh points), and past lessons are injected into
    the planner prompt: "last time the pen rolled away on contact…"
+
+The planner also thinks before planning (same think-then-JSON pattern), so ambiguous
+instructions get a beat of scene reasoning before phrases are committed. CoT lives
+entirely in the VLM layer by design: the 52M motor policy has no language head, and
+its form of introspection is the world-model surprise signal above.
 
 ## Setup
 
