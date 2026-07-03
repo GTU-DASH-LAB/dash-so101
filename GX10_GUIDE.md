@@ -149,7 +149,23 @@ Expected reading of results: `wm_act > act` on contact-rich tasks is the signatu
 the world-model loss working; `wm_act_large > wm_act` only where episodes are plentiful
 (LIBERO has 50/task — scale may not pay; that's a finding, not a failure).
 
-## 4. Troubleshooting
+## 4. pi-WM: the "beat pi0.5" experiment (GX10)
+
+The strongest model in this repo: frozen `pi05_libero_finetuned` (3B) + a 12.5M
+world-model scorer doing best-of-N action selection. Full instructions, honest
+expectations, and the results table live in [pi_wm/README.md](pi_wm/README.md).
+Short version:
+
+```bash
+python pi_wm/make_checkpoint.py --out pi_wm_checkpoint            # ~7GB download
+python pi_wm/train_scorer.py --pi05-path pi_wm_checkpoint --out outputs/scorer_libero.pt
+# then the two lerobot-eval commands in pi_wm/README.md: n_samples=1 (baseline) vs 8
+```
+
+Run the baseline first — reproducing pi0.5's published 97.5 validates the whole
+setup before the experiment costs you a day of eval time.
+
+## 5. Troubleshooting
 
 - `PluginLoadError ... wm_act` → `PYTHONPATH` must include the repo root.
 - MuJoCo render errors → `export MUJOCO_GL=egl` (headless) before train/eval.

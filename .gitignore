@@ -26,3 +26,4 @@ so_brain/last_after.png
 so_brain/episodic_memory.jsonl
 benchmark/outputs/
 benchmark/eval/
+pi_wm_checkpoint/
