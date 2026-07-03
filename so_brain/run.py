@@ -1,16 +1,22 @@
-"""The full zero-shot loop: instruction -> plan -> ground -> execute on the robot.
+"""The full zero-shot loop with recovery: instruction -> plan -> ground -> execute
+-> verify -> learn from failure -> retry.
 
     ./so_brain/run.sh "put the red pen on the black mouse pad"
 
-Steps: grab one camera frame; VLM planner extracts (object, destination); OWLv2
-grounds them to two image points; the point-conditioned policy is launched via
-the battle-tested `lerobot-rollout` with the points encoded in the task string.
+Each attempt: grab a frame; the planner (VLM) extracts (object, destination),
+informed by lessons from past failures in episodic memory; the grounder turns the
+phrases into two image points; `lerobot-rollout` executes the point-conditioned
+policy for --duration seconds. Afterwards the grounder re-detects the object: if it
+isn't at the destination, the VLM writes a postmortem of what went wrong, the
+attempt is logged to memory, and the loop re-grounds (the object may have moved!)
+and tries again.
 
 Useful flags:
     --dry-run          stop before touching the robot; save annotated preview
     --image PATH       use a saved image instead of the live camera
-    --no-llm           skip the VLM, parse the instruction with a regex
-    --object/--place   bypass the planner entirely with explicit phrases
+    --no-llm           skip the VLM planner/postmortem, parse with a regex
+    --object/--place   bypass the planner with explicit phrases
+    --attempts N       max attempts (default 3)   --duration S   seconds per attempt
 """
 
 import argparse
@@ -21,9 +27,10 @@ import sys
 import cv2
 
 from so_brain import grounding, planner
+from so_brain.memory import Memory
 
 
-def capture_frame(index: int, width: int, height: int) -> str:
+def capture_frame(index: int, width: int, height: int, path: str) -> str:
     cap = cv2.VideoCapture(index)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
@@ -31,9 +38,28 @@ def capture_frame(index: int, width: int, height: int) -> str:
     cap.release()  # must release before lerobot-rollout opens the same camera
     if not ok:
         sys.exit(f"could not read from camera {index}")
-    path = "so_brain/last_frame.png"
     cv2.imwrite(path, frame)
     return path
+
+
+def save_preview(image: str, pick, place) -> None:
+    frame = cv2.imread(image)
+    h, w = frame.shape[:2]
+    cv2.circle(frame, (int(pick[0] * w), int(pick[1] * h)), 12, (0, 255, 0), 3)
+    cv2.circle(frame, (int(place[0] * w), int(place[1] * h)), 12, (255, 0, 0), 3)
+    cv2.imwrite("so_brain/last_plan.png", frame)
+
+
+def verify(after_image: str, obj_phrase: str, place, tol: float = 0.12) -> tuple[str, str]:
+    """Detector-based outcome check: is the object now at the destination?"""
+    try:
+        u, v, _ = grounding.locate(after_image, obj_phrase)
+    except LookupError:
+        return "unknown", f"{obj_phrase!r} not visible after the attempt"
+    dist = ((u - place[0]) ** 2 + (v - place[1]) ** 2) ** 0.5
+    if dist <= tol:
+        return "success", f"object ended {dist:.2f} from the target point"
+    return "fail", f"object ended at ({u:.2f}, {v:.2f}), {dist:.2f} away from the target"
 
 
 def main():
@@ -45,61 +71,84 @@ def main():
     parser.add_argument("--place")
     parser.add_argument("--no-llm", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--attempts", type=int, default=3)
+    parser.add_argument("--duration", type=int, default=int(os.environ.get("EPISODE_TIME_S", 25)))
     args = parser.parse_args()
 
     env = os.environ
-    image = args.image or capture_frame(
-        int(env["CAMERA_INDEX"]), int(env["CAMERA_W"]), int(env["CAMERA_H"])
-    )
+    memory = Memory()
 
-    # 1. Understand the language.
-    if args.object and args.place:
-        goal = {"object": args.object, "destination": args.place}
-    elif args.no_llm:
-        goal = planner.naive_plan(args.instruction)
-    else:
-        goal = planner.plan(args.instruction, image_path=image)
-    print(f"plan: pick {goal['object']!r} -> place on {goal['destination']!r}")
+    def grab(path):
+        return capture_frame(int(env["CAMERA_INDEX"]), int(env["CAMERA_W"]), int(env["CAMERA_H"]), path)
 
-    # 2. Ground it to pixels (zero-shot, open vocabulary).
-    pick = grounding.locate(image, goal["object"])
-    place = grounding.locate(image, goal["destination"])
-    print(f"pick  point: ({pick[0]:.3f}, {pick[1]:.3f})  score={pick[2]:.2f}")
-    print(f"place point: ({place[0]:.3f}, {place[1]:.3f})  score={place[2]:.2f}")
+    for attempt in range(1, args.attempts + 1):
+        image = args.image if (args.image and attempt == 1) else grab("so_brain/last_before.png")
 
-    task = f"pick@{pick[0]:.3f},{pick[1]:.3f} place@{place[0]:.3f},{place[1]:.3f}"
+        # 1. Understand the language (with lessons from past failures).
+        lessons = memory.lessons(args.instruction or f"{args.object} {args.place}")
+        if lessons:
+            print(f"lessons from memory:\n{lessons}")
+        if args.object and args.place:
+            goal = {"object": args.object, "destination": args.place}
+        elif args.no_llm:
+            goal = planner.naive_plan(args.instruction)
+        else:
+            goal = planner.plan(args.instruction, image_path=image, lessons=lessons)
+        print(f"[attempt {attempt}] pick {goal['object']!r} -> place on {goal['destination']!r}")
 
-    # Annotated preview: green = pick, blue = place.
-    frame = cv2.imread(image)
-    h, w = frame.shape[:2]
-    cv2.circle(frame, (int(pick[0] * w), int(pick[1] * h)), 12, (0, 255, 0), 3)
-    cv2.circle(frame, (int(place[0] * w), int(place[1] * h)), 12, (255, 0, 0), 3)
-    cv2.imwrite("so_brain/last_plan.png", frame)
-    print(f"task string: {task}   (preview: so_brain/last_plan.png)")
+        # 2. Ground to pixels (re-done every attempt: failed grasps move objects).
+        pick = grounding.locate(image, goal["object"])
+        place = grounding.locate(image, goal["destination"])
+        print(f"pick ({pick[0]:.3f}, {pick[1]:.3f}) score={pick[2]:.2f} | place ({place[0]:.3f}, {place[1]:.3f}) score={place[2]:.2f}")
+        save_preview(image, pick, place)
+        task = f"pick@{pick[0]:.3f},{pick[1]:.3f} place@{place[0]:.3f},{place[1]:.3f}"
+        print(f"task string: {task}   (preview: so_brain/last_plan.png)")
 
-    if args.dry_run:
-        return
-    if not args.model:
-        sys.exit("no policy: pass --model or set POINTACT_MODEL in config.env")
+        if args.dry_run:
+            return
+        if not args.model:
+            sys.exit("no policy: pass --model or set POINTACT_MODEL in config.env")
 
-    # 3. Execute with the standard rollout stack.
-    cmd = [
-        "lerobot-rollout",
-        "--strategy.type=base",
-        "--robot.type=so101_follower",
-        f"--robot.port={env['FOLLOWER_PORT']}",
-        f"--robot.id={env['FOLLOWER_ID']}",
-        "--robot.cameras={ front: {type: opencv, index_or_path: %s, width: %s, height: %s, fps: %s}}"
-        % (env["CAMERA_INDEX"], env["CAMERA_W"], env["CAMERA_H"], env["CAMERA_FPS"]),
-        f"--task={task}",
-        "--policy.discover_packages_path=point_act",
-        f"--policy.path={args.model}",
-        f"--policy.device={env.get('POLICY_DEVICE', 'cpu')}",
-        "--inference.type=sync",
-        "--display_data=true",
-    ]
-    print("launching:", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+        # 3. Execute.
+        cmd = [
+            "lerobot-rollout",
+            "--strategy.type=base",
+            "--robot.type=so101_follower",
+            f"--robot.port={env['FOLLOWER_PORT']}",
+            f"--robot.id={env['FOLLOWER_ID']}",
+            "--robot.cameras={ front: {type: opencv, index_or_path: %s, width: %s, height: %s, fps: %s}}"
+            % (env["CAMERA_INDEX"], env["CAMERA_W"], env["CAMERA_H"], env["CAMERA_FPS"]),
+            f"--task={task}",
+            f"--duration={args.duration}",
+            "--policy.discover_packages_path=point_act",
+            f"--policy.path={args.model}",
+            f"--policy.device={env.get('POLICY_DEVICE', 'cpu')}",
+            "--inference.type=sync",
+        ]
+        subprocess.run(cmd, check=True)
+
+        # 4. Verify, explain, remember.
+        after = grab("so_brain/last_after.png")
+        outcome, note = verify(after, goal["object"], place)
+        if not args.no_llm:
+            pm = planner.postmortem(args.instruction or task, image, after)
+            if pm:
+                outcome = "success" if pm["success"] and outcome != "fail" else outcome
+                note = f"{note}; VLM: {pm['note']}"
+        print(f"[attempt {attempt}] {outcome}: {note}")
+        memory.log(
+            instruction=args.instruction,
+            object=goal["object"],
+            destination=goal["destination"],
+            pick=[round(pick[0], 3), round(pick[1], 3)],
+            place=[round(place[0], 3), round(place[1], 3)],
+            outcome=outcome,
+            note=note,
+            attempt=attempt,
+        )
+        if outcome == "success":
+            return
+        print("retrying with a fresh look at the scene..." if attempt < args.attempts else "giving up.")
 
 
 if __name__ == "__main__":

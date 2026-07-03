@@ -33,11 +33,54 @@ ground truth. See `./run.sh --dry-run` below to reproduce.
 
 | File | Role | Model | Runs on |
 |---|---|---|---|
-| [planner.py](planner.py) | instruction → object/destination phrases | any OpenAI-compatible VLM (default ollama `qwen2.5vl:7b`); regex fallback for offline | Mac or GX10 |
-| [grounding.py](grounding.py) | phrase → image point | `google/owlv2-base-patch16-ensemble` (~600MB, frozen) | Mac (MPS/CPU, ~1s) |
+| [planner.py](planner.py) | instruction → object/destination phrases; failure postmortems | any OpenAI-compatible VLM (default ollama `qwen2.5vl:7b`); regex fallback for offline | Mac or GX10 |
+| [grounding.py](grounding.py) | phrase → image point (pluggable, see below) | OWLv2 or `nvidia/LocateAnything-3B` | GX10 (models download on first use) |
 | [../point_act/](../point_act/) | points → 30Hz motor control | Point-ACT (subclasses WM-ACT: keeps the world-model loss) | Mac MPS |
-| [relabel.py](relabel.py) | auto-label training episodes with points | OWLv2 | GX10 |
-| [run.py](run.py) / [run.sh](run.sh) | glue: capture → plan → ground → rollout | — | Mac |
+| [memory.py](memory.py) | episodic memory: log attempts, recall lessons | — (JSONL) | Mac |
+| [relabel.py](relabel.py) | auto-label training episodes with points | grounder | GX10 |
+| [run.py](run.py) / [run.sh](run.sh) | attempt loop: plan → ground → execute → verify → learn → retry | — | Mac |
+
+### Grounder backends (`SO_BRAIN_GROUNDER`)
+
+- `owlv2` (default): `google/owlv2-base-patch16-ensemble`, ~150M, ~600MB. Fast, light,
+  plain noun phrases. Verified on this repo's scene image.
+- `nvidia`: [LocateAnything-3B](https://research.nvidia.com/labs/lpr/locate-anything/)
+  (Moon-ViT + Qwen2.5, Parallel Box Decoding). Much stronger at *referring expressions*
+  ("the pen closest to the robot arm", "the leftmost cube") because a full language
+  decoder does the grounding. Needs CUDA → GX10. **License: NVIDIA non-commercial
+  research only.** The output-tag parsing is written from the model card — verify
+  against their utility method on first GX10 run.
+
+Models download on first `locate()` call — keep heavy backends off the laptop.
+
+## Physics: the world model at runtime
+
+Training already forces WM-ACT's backbone to predict the visual future (JEPA loss).
+Two tools now use that at runtime:
+
+- [../wm_act/selfcheck.py](../wm_act/selfcheck.py) — proof the model learned
+  action-conditioned dynamics: surprise (prediction error) with **true** action chunks
+  must be clearly lower than with **shuffled** ones. Run on the GX10 after training; it
+  also prints the calibrated threshold for the monitor.
+- [../wm_act/monitor.py](../wm_act/monitor.py) — `SurpriseMonitor`: at every control
+  step the policy predicts the latent 0.5s ahead; when reality diverges (missed grasp,
+  dropped object, collision), surprise spikes past the calibrated threshold. Ready for
+  a custom control loop; the attempt-level recovery below doesn't need it.
+
+## Memory and error recovery
+
+`run.py` is now a closed loop at the attempt level:
+
+1. execute for `--duration` seconds via `lerobot-rollout`
+2. **verify**: the grounder re-detects the object — is it within tolerance of the
+   place point? (objective, no VLM needed)
+3. **postmortem**: the VLM compares before/after photos and writes one sentence on
+   what went wrong (best-effort, skipped with `--no-llm`)
+4. **remember**: everything is appended to `episodic_memory.jsonl` — persistent
+   across sessions
+5. **retry**: the scene is re-captured and re-grounded (a failed grasp moves the
+   object — recovery *requires* fresh points), and past lessons are injected into
+   the planner prompt: "last time the pen rolled away on contact…"
 
 ## Setup
 

@@ -91,6 +91,26 @@ class WMACTPolicy(ACTPolicy):
         return loss, loss_dict
 
     @torch.no_grad()
+    def visual_latent(self, batch: dict[str, Tensor]) -> Tensor:
+        """(B, feat_dim) pooled visual latent of the current observation."""
+        imgs = [batch[key] for key in self.config.image_features if key in batch]
+        return self._pooled_feats(self.model.backbone, imgs)
+
+    @torch.no_grad()
+    def predict_future_latent(self, latent: Tensor, actions: Tensor) -> Tensor:
+        """World-model rollout: expected visual latent `wm_future_offset` frames ahead,
+        given the current latent and an action chunk (normalized action space, i.e.
+        exactly what predict_action_chunk returns)."""
+        action_emb = self.wm_action_proj(actions.flatten(start_dim=1))
+        return self.wm_predictor(torch.cat([latent, action_emb], dim=-1))
+
+    @staticmethod
+    def surprise(predicted: Tensor, actual: Tensor) -> Tensor:
+        """(B,) physics-violation signal: 1 - cos(expected future, observed future).
+        High values mean reality diverged from the world model's expectation."""
+        return 1 - F.cosine_similarity(predicted, actual, dim=-1)
+
+    @torch.no_grad()
     def _update_wm_target(self):
         m = self.config.wm_ema_momentum
         for p, tp in zip(

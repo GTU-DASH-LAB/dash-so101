@@ -26,33 +26,71 @@ SYSTEM = (
 )
 
 
-def plan(instruction: str, image_path: str | None = None) -> dict:
-    content: list | str = [{"type": "text", "text": instruction}]
-    if image_path:
-        b64 = base64.b64encode(open(image_path, "rb").read()).decode()
-        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
-    body = json.dumps(
-        {
-            "model": MODEL,
-            "temperature": 0,
-            "messages": [
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": content},
-            ],
-        }
-    ).encode()
+def _chat(messages: list) -> str:
+    body = json.dumps({"model": MODEL, "temperature": 0, "messages": messages}).encode()
     req = urllib.request.Request(
         f"{ENDPOINT}/chat/completions", data=body, headers={"Content-Type": "application/json"}
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
-        text = json.loads(resp.read())["choices"][0]["message"]["content"]
+        return json.loads(resp.read())["choices"][0]["message"]["content"]
+
+
+def _image_part(image_path: str) -> dict:
+    b64 = base64.b64encode(open(image_path, "rb").read()).decode()
+    return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+
+
+def _extract_json(text: str) -> dict:
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         raise ValueError(f"planner returned no JSON: {text!r}")
-    result = json.loads(match.group())
+    return json.loads(match.group())
+
+
+def plan(instruction: str, image_path: str | None = None, lessons: str = "") -> dict:
+    if lessons:
+        instruction = (
+            f"Lessons from this robot's previous failed attempts:\n{lessons}\n\n"
+            f"Take them into account. Instruction: {instruction}"
+        )
+    content: list | str = [{"type": "text", "text": instruction}]
+    if image_path:
+        content.append(_image_part(image_path))
+    result = _extract_json(
+        _chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}])
+    )
     if "error" in result:
         raise ValueError(f"planner: {result['error']}")
     return {"object": result["object"], "destination": result["destination"]}
+
+
+def postmortem(instruction: str, before_path: str, after_path: str) -> dict | None:
+    """Ask the VLM what went wrong, comparing before/after photos of an attempt.
+    Returns {"success": bool, "note": str}, or None when no VLM is reachable."""
+    prompt = (
+        f"A robot arm was told: {instruction!r}. The first photo is the table BEFORE its "
+        "attempt, the second is AFTER. Respond with ONLY a JSON object: "
+        '{"success": true/false, "note": "<one short sentence: what happened, and if it '
+        'failed, what most likely went wrong>"}'
+    )
+    try:
+        result = _extract_json(
+            _chat(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            _image_part(before_path),
+                            _image_part(after_path),
+                        ],
+                    }
+                ]
+            )
+        )
+        return {"success": bool(result.get("success")), "note": str(result.get("note", ""))}
+    except Exception:  # noqa: BLE001 — postmortem is best-effort, never blocks recovery
+        return None
 
 
 # ponytail: regex fallback for offline use / simple phrasings; the LLM handles the rest.

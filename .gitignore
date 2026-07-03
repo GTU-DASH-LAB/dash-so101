@@ -21,3 +21,6 @@ wandb/
 so_brain/last_frame.png
 so_brain/last_plan.png
 point_labels*.json
+so_brain/last_before.png
+so_brain/last_after.png
+so_brain/episodic_memory.jsonl

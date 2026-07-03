@@ -59,6 +59,22 @@ def main():
     action = policy.select_action(obs)
     assert action.shape == (1, state_dim), action.shape
 
+    # World-model runtime API + surprise monitor bookkeeping.
+    from wm_act.monitor import SurpriseMonitor
+
+    latent = policy.visual_latent(obs)
+    assert latent.shape == (1, 512)
+    chunk_actions = torch.randn(1, chunk, state_dim)
+    pred = policy.predict_future_latent(latent, chunk_actions)
+    assert pred.shape == latent.shape
+    assert torch.isfinite(policy.surprise(pred, latent)).all()
+
+    monitor = SurpriseMonitor(policy, threshold=0.5)
+    offset = policy.config.wm_future_offset
+    surprises = [monitor.step(i, obs, chunk_actions) for i in range(offset + 2)]
+    assert all(s is None for s in surprises[:offset]), "surprise fired before horizon filled"
+    assert all(s is not None for s in surprises[offset:]), "surprise missing after horizon"
+
     print("smoke test OK:", {k: round(v, 4) for k, v in loss_dict.items()})
 
 
