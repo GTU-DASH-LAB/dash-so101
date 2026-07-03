@@ -24,3 +24,5 @@ point_labels*.json
 so_brain/last_before.png
 so_brain/last_after.png
 so_brain/episodic_memory.jsonl
+benchmark/outputs/
+benchmark/eval/
