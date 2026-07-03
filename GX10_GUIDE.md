@@ -165,6 +165,11 @@ python pi_wm/train_scorer.py --pi05-path pi_wm_checkpoint --out outputs/scorer_l
 Run the baseline first — reproducing pi0.5's published 97.5 validates the whole
 setup before the experiment costs you a day of eval time.
 
+For **unseen / long-horizon tasks** (`libero_10`, where pi0.5 degrades), run the
+hierarchical harness — CoT decomposition + grounded verification + episodic memory
+around the frozen policy, with a built-in 4-way ablation. Commands and expectations:
+[pi_wm/README.md](pi_wm/README.md), "long-horizon experiment" section.
+
 ## 5. Troubleshooting
 
 - `PluginLoadError ... wm_act` → `PYTHONPATH` must include the repo root.

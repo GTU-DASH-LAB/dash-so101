@@ -99,6 +99,49 @@ one scoring decision per 10 env steps keeps the N× inference cost off the criti
 - [train_scorer.py](train_scorer.py) / [make_checkpoint.py](make_checkpoint.py) — GX10 steps 1-2
 - [smoke_test.py](smoke_test.py) — offline checks (run on the Mac, no downloads)
 
+## The long-horizon / unseen-task experiment (eval_hierarchical.py)
+
+Best-of-N can't fix LIBERO-Long: on unseen *compositions*, all N samples are bad.
+But pi0.5 has seen every atomic skill — it's the composition that's out of
+distribution. [eval_hierarchical.py](eval_hierarchical.py) closes that gap by
+composing this repo's full stack around the frozen policy:
+
+```
+long instruction ─► CoT decompose (VLM): atomic sub-commands in training phrasing
+       │                    (with lessons from episodic memory injected)
+       ▼
+pi-WM executes sub-command k as its task string   [best-of-N per decision]
+       │         action queue flushed on every sub-goal switch
+       ▼
+verify every 40 steps: grounder evidence (object→destination distance)
+       + CoT VLM check ─► advance / retry once / fail
+       ▼
+failures logged to memory ─► episode ep+1 plans around them  [lifelong learning]
+```
+
+```bash
+export MUJOCO_GL=egl      # ollama must be reachable for the CoT layers
+# the experiment:
+PYTHONPATH=. python pi_wm/eval_hierarchical.py --policy-path pi_wm_checkpoint \
+    --scorer-path outputs/scorer_libero.pt --suite libero_10 --n-episodes 10 --grounder
+# baselines under the IDENTICAL loop:
+#   plain pi0.5:            --no-plan --n-samples 1
+#   +best-of-N only:        --no-plan
+#   +hierarchy, no memory:  --no-memory
+```
+
+That's a 4-row ablation on `libero_10` isolating each contribution: best-of-N,
+CoT decomposition, and memory. `benchmark/hier_results.json` accumulates rows;
+`benchmark/libero_memory.jsonl` is the memory (delete it to reset lifelong state;
+keep it to measure cross-episode learning — LIBERO's actual theme).
+
+Honest expectations: the decomposition helps exactly where pi0.5's long-task
+failures are compositional (published hierarchical-VLA results suggest double-digit
+gains on long suites); memory helps only when failures repeat across episodes;
+neither helps when an atomic skill itself is broken — that residual is what the
+scorer's best-of-N attacks. Caveat for the diary: memory-on runs are a *lifelong*
+protocol, not comparable to single-episode published numbers — report both.
+
 ## Upgrade paths, in order of expected value
 
 1. **Bigger N + temperature on the noise** — pure compute, zero code.

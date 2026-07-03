@@ -27,3 +27,5 @@ so_brain/episodic_memory.jsonl
 benchmark/outputs/
 benchmark/eval/
 pi_wm_checkpoint/
+benchmark/_hier_frame.png
+benchmark/libero_memory.jsonl

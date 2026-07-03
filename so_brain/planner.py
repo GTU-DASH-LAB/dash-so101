@@ -64,13 +64,15 @@ def _image_part(image_path: str) -> dict:
 
 
 def _extract_json(text: str) -> tuple[dict, str]:
-    """Split a think-then-JSON response into (json, thought). Our schemas are flat,
-    so the JSON is the last brace-balanced block without nested braces."""
+    """Split a think-then-JSON response into (json, thought). Handles nested JSON
+    (decompose returns a list of subgoal dicts) via raw_decode from each brace."""
     thought = " ".join(re.findall(r"<think>(.*?)</think>", text, re.DOTALL)).strip()
     stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    for candidate in reversed(re.findall(r"\{[^{}]*\}", stripped, re.DOTALL)):
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", stripped):
         try:
-            return json.loads(candidate), thought
+            obj, _ = decoder.raw_decode(stripped[match.start():])
+            return obj, thought
         except json.JSONDecodeError:
             continue
     raise ValueError(f"planner returned no JSON: {text!r}")
@@ -153,6 +155,56 @@ def naive_plan(instruction: str) -> dict:
     return {"object": m["obj"], "destination": m["dest"]}
 
 
+DECOMPOSE_PROMPT = """You are the high-level planner of a robot arm. The low-level policy was
+trained on SHORT atomic commands, each involving one object, phrased like:
+"pick up the alphabet soup and place it in the basket" / "open the top drawer of the
+cabinet" / "put the black bowl on the stove" / "turn on the stove".
+
+Long instruction: {instruction!r}
+{lessons}
+Think step by step inside <think></think>: what minimal ordered sequence of atomic
+commands completes the long instruction? Keep each command in the training phrasing.
+
+Then respond with ONLY a JSON object:
+{{"subgoals": [{{"instruction": "<atomic command>",
+                "object": "<detector phrase for the object moved>",
+                "destination": "<detector phrase for where it ends up, or \\"\\">"}}, ...]}}"""
+
+VERIFY_PROMPT = """Photo of a robot workspace. Has this command been FULLY completed:
+{subgoal!r}?
+{evidence}
+Think briefly inside <think></think>: where is the object now, relative to where the
+command wants it? Then respond with ONLY a JSON object:
+{{"done": true/false, "note": "<one short sentence>"}}"""
+
+
+def decompose(instruction: str, image_path: str | None = None, lessons: str = "") -> list[dict]:
+    """Long instruction -> ordered atomic subgoals with detector phrases (CoT)."""
+    lessons_text = f"Lessons from previous failed attempts at this task:\n{lessons}\n" if lessons else ""
+    content: list = [{"type": "text", "text": DECOMPOSE_PROMPT.format(instruction=instruction, lessons=lessons_text)}]
+    if image_path:
+        content.append(_image_part(image_path))
+    result, thought = _extract_json(_chat([{"role": "user", "content": content}], max_tokens=1200))
+    subgoals = [s for s in result.get("subgoals", []) if s.get("instruction")]
+    if not subgoals:
+        raise ValueError(f"decompose returned no subgoals: {result}")
+    for s in subgoals:
+        s.setdefault("object", ""), s.setdefault("destination", "")
+    if thought:
+        print(f"decompose thinking: {thought[:300]}")
+    return subgoals
+
+
+def verify_subgoal(subgoal: str, image_path: str, evidence: str = "") -> dict:
+    """One CoT VLM call: is this subgoal visibly complete? -> {"done": bool, "note": str}"""
+    content = [
+        {"type": "text", "text": VERIFY_PROMPT.format(subgoal=subgoal, evidence=evidence)},
+        _image_part(image_path),
+    ]
+    result, _ = _extract_json(_chat([{"role": "user", "content": content}], max_tokens=400))
+    return {"done": bool(result.get("done")), "note": str(result.get("note", ""))}
+
+
 def _selftest():
     """Offline check of the think-then-JSON parsing (no network, no models)."""
     canned = (
@@ -184,6 +236,18 @@ def _selftest():
         _chat = real_chat
     assert diag["cause"] == "grasp_point" and "slipped" in diag["thought"]
     assert diag["pick_offset"] == [0.08, -0.01], diag["pick_offset"]  # clamped to ±0.08
+
+    # Nested JSON (decompose) survives think-tag stripping and prose around it.
+    nested = (
+        "<think>Two objects must move, so two picks {order matters}.</think>\n"
+        "Here is the plan:\n"
+        '{"subgoals": [{"instruction": "pick up the alphabet soup and place it in the basket", '
+        '"object": "alphabet soup can", "destination": "basket"}, '
+        '{"instruction": "pick up the tomato sauce and place it in the basket", '
+        '"object": "tomato sauce can", "destination": "basket"}]}'
+    )
+    result, thought = _extract_json(nested)
+    assert len(result["subgoals"]) == 2 and "order matters" in thought
     print("planner self-test OK")
 
 
