@@ -100,6 +100,20 @@ def main():
     assert torch.allclose(chunk_e[0, :, -1], expected_grip, atol=1e-5), "gripper not effort-scaled"
     assert torch.allclose(chunk_e[0, :, :-1], chunk_c[0, :, :-1]), "effort leaked into arm joints"
 
+    # Tracked (v2) sidecar from `relabel.py --every N`: the marker follows the object —
+    # lookup returns the nearest labeled frame at/before the current frame_index.
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump({"0": {"every": 10, "frames": {
+            "0": {"pick": [0.1, 0.1], "place": [0.9, 0.9]},
+            "20": {"pick": [0.5, 0.5]},
+        }}}, f)
+        tracked_path = f.name
+    tracked = make_policy(tracked_path)
+    fake = {"episode_index": torch.tensor([0, 0]), "frame_index": torch.tensor([25, 5])}
+    assert tracked._lookup_points(fake, 0, "pick") == (0.5, 0.5), "frame 25 should use label @20"
+    assert tracked._lookup_points(fake, 1, "pick") == (0.1, 0.1), "frame 5 should use label @0"
+    assert tracked._lookup_points(fake, 0, "place") == (0.9, 0.9), "place falls back to @0"
+
     print("smoke test OK:", {k: round(v, 4) for k, v in loss_dict.items()})
 
 

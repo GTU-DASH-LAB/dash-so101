@@ -73,6 +73,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--attempts", type=int, default=3)
     parser.add_argument("--duration", type=int, default=int(os.environ.get("EPISODE_TIME_S", 25)))
+    parser.add_argument("--reground-every", type=int, default=0,
+                        help="seconds between re-groundings while moving (0 = once per attempt)")
     args = parser.parse_args()
 
     env = os.environ
@@ -122,10 +124,19 @@ def main():
             print(f"applying diagnosed grasp correction ({du:+.3f}, {dv:+.3f})")
         effort = corrections.get("effort", goal.get("effort"))
         print(f"pick ({pick[0]:.3f}, {pick[1]:.3f}) score={pick[2]:.2f} | place ({place[0]:.3f}, {place[1]:.3f}) score={place[2]:.2f}")
+        def apply_offset(pt):
+            if "pick_offset" not in corrections:
+                return pt
+            du, dv = corrections["pick_offset"]
+            return (min(1.0, max(0.0, pt[0] + du)), min(1.0, max(0.0, pt[1] + dv)), pt[2])
+
+        def make_task(pick_pt, place_pt):
+            s = f"pick@{pick_pt[0]:.3f},{pick_pt[1]:.3f} place@{place_pt[0]:.3f},{place_pt[1]:.3f}"
+            return s + (f" effort@{effort:.2f}" if effort is not None else "")
+
         save_preview(image, pick, place)
-        task = f"pick@{pick[0]:.3f},{pick[1]:.3f} place@{place[0]:.3f},{place[1]:.3f}"
+        task = make_task(pick, place)
         if effort is not None:
-            task += f" effort@{effort:.2f}"
             print(f"grip effort: {effort:.2f} (0.5≈fragile, 0.8≈normal, 1.1≈heavy/slippery)")
         print(f"task string: {task}   (preview: so_brain/last_plan.png)")
 
@@ -134,23 +145,40 @@ def main():
         if not args.model:
             sys.exit("no policy: pass --model or set POINTACT_MODEL in config.env")
 
-        # 3. Execute.
-        cmd = [
-            "lerobot-rollout",
-            "--strategy.type=base",
-            "--robot.type=so101_follower",
-            f"--robot.port={env['FOLLOWER_PORT']}",
-            f"--robot.id={env['FOLLOWER_ID']}",
-            "--robot.cameras={ front: {type: opencv, index_or_path: %s, width: %s, height: %s, fps: %s}}"
-            % (env["CAMERA_INDEX"], env["CAMERA_W"], env["CAMERA_H"], env["CAMERA_FPS"]),
-            f"--task={task}",
-            f"--duration={args.duration}",
-            "--policy.discover_packages_path=point_act",
-            f"--policy.path={args.model}",
-            f"--policy.device={env.get('POLICY_DEVICE', 'cpu')}",
-            "--inference.type=sync",
-        ]
-        subprocess.run(cmd, check=True)
+        # 3. Execute — in segments when --reground-every is set, re-locating the object
+        # between segments so the markers follow it while things move. Honest limit:
+        # points are still ~segment-length stale (TIC-VLA territory); a 30Hz tracking
+        # loop needs a custom control loop, not lerobot-rollout.
+        segment = args.reground_every if args.reground_every > 0 else args.duration
+        elapsed = 0
+        while elapsed < args.duration:
+            if elapsed:
+                image = grab("so_brain/last_before.png")
+                try:
+                    pick = apply_offset(grounding.locate(image, grasp_target))
+                    place = grounding.locate(image, goal["destination"])
+                    task = make_task(pick, place)
+                    save_preview(image, pick, place)
+                    print(f"re-grounded: {task}")
+                except LookupError as e:
+                    print(f"re-ground failed ({e}); keeping previous points")
+            cmd = [
+                "lerobot-rollout",
+                "--strategy.type=base",
+                "--robot.type=so101_follower",
+                f"--robot.port={env['FOLLOWER_PORT']}",
+                f"--robot.id={env['FOLLOWER_ID']}",
+                "--robot.cameras={ front: {type: opencv, index_or_path: %s, width: %s, height: %s, fps: %s}}"
+                % (env["CAMERA_INDEX"], env["CAMERA_W"], env["CAMERA_H"], env["CAMERA_FPS"]),
+                f"--task={task}",
+                f"--duration={min(segment, args.duration - elapsed)}",
+                "--policy.discover_packages_path=point_act",
+                f"--policy.path={args.model}",
+                f"--policy.device={env.get('POLICY_DEVICE', 'cpu')}",
+                "--inference.type=sync",
+            ]
+            subprocess.run(cmd, check=True)
+            elapsed += segment
 
         # 4. Verify, think about what went wrong, remember.
         after = grab("so_brain/last_after.png")

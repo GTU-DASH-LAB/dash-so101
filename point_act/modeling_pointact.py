@@ -76,7 +76,17 @@ class PointACTPolicy(WMACTPolicy):
                 return pts[kind]
         if "episode_index" in batch and self._episode_points:
             ep = self._episode_points.get(str(int(batch["episode_index"][b])))
-            if ep and kind in ep:
+            if ep and "frames" in ep:
+                # tracked labels (relabel.py --every N): nearest labeled frame at/before now,
+                # so the marker follows the object as it moves through the episode
+                now = int(batch["frame_index"][b]) if "frame_index" in batch else 0
+                for key in sorted((int(k) for k in ep["frames"]), reverse=True):
+                    if key <= now and kind in ep["frames"][str(key)]:
+                        return tuple(ep["frames"][str(key)][kind])
+                for key in sorted(int(k) for k in ep["frames"]):
+                    if kind in ep["frames"][str(key)]:
+                        return tuple(ep["frames"][str(key)][kind])
+            elif ep and kind in ep:
                 return tuple(ep[kind])
         return None
 

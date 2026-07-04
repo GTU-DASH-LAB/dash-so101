@@ -30,9 +30,14 @@ def _to_pil(image: "np.ndarray | str"):
 def _locate_owlv2(pil, phrase: str, threshold: float) -> tuple[float, float, float]:
     global _owlv2
     if _owlv2 is None:
+        import torch
         from transformers import pipeline
 
-        _owlv2 = pipeline("zero-shot-object-detection", model="google/owlv2-base-patch16-ensemble")
+        _owlv2 = pipeline(
+            "zero-shot-object-detection",
+            model="google/owlv2-base-patch16-ensemble",
+            device=0 if torch.cuda.is_available() else -1,  # GPU matters when tracking every N frames
+        )
     detections = _owlv2(pil, candidate_labels=[phrase], threshold=threshold)
     if not detections:
         raise LookupError(f"could not find '{phrase}' in the image")

@@ -29,3 +29,4 @@ benchmark/eval/
 pi_wm_checkpoint/
 benchmark/_hier_frame.png
 benchmark/libero_memory.jsonl
+pencil_pickup_vla/kaggle_pointact/4_kaggle_train_pointact.ipynb
