@@ -58,9 +58,11 @@ def _locate_nvidia(pil, phrase: str, threshold: float) -> tuple[float, float, fl
         from transformers import AutoModel, AutoProcessor
 
         processor = AutoProcessor.from_pretrained("nvidia/LocateAnything-3B", trust_remote_code=True)
+        # bf16 needs Ampere+; T4 (sm75, e.g. Kaggle) falls back to fp16
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         model = (
             AutoModel.from_pretrained(
-                "nvidia/LocateAnything-3B", torch_dtype=torch.bfloat16, trust_remote_code=True
+                "nvidia/LocateAnything-3B", torch_dtype=dtype, trust_remote_code=True
             )
             .to("cuda")
             .eval()
