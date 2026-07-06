@@ -30,6 +30,16 @@ from so_brain import grounding, planner
 from so_brain.memory import Memory
 
 
+def default_device() -> str:
+    """Prefer the GPU: at 30Hz control, CPU inference starves the loop (~4Hz observed)."""
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        return "cpu"
+
+
 def capture_frame(index: int, width: int, height: int, path: str) -> str:
     cap = cv2.VideoCapture(index)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -73,13 +83,15 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--attempts", type=int, default=3)
     parser.add_argument("--duration", type=int, default=int(os.environ.get("EPISODE_TIME_S", 25)))
-    parser.add_argument("--reground-every", type=int, default=0,
-                        help="seconds between re-groundings while moving (0 = once per attempt)")
+    parser.add_argument("--reground-every", type=int, default=8,
+                        help="seconds between re-groundings while moving (0 = once per attempt); "
+                        "mirrors training-time tracked labels (relabel.py --every 10)")
     args = parser.parse_args()
 
     env = os.environ
     memory = Memory()
     corrections: dict = {}  # CoT diagnosis of the previous attempt -> concrete changes
+    prev_goal: dict | None = None  # fallback when the planner flakes on a retry frame
 
     def grab(path):
         return capture_frame(int(env["CAMERA_INDEX"]), int(env["CAMERA_W"]), int(env["CAMERA_H"]), path)
@@ -96,12 +108,21 @@ def main():
         elif args.no_llm:
             goal = planner.naive_plan(args.instruction)
         else:
-            goal = planner.plan(args.instruction, image_path=image, lessons=lessons)
+            try:
+                goal = planner.plan(args.instruction, image_path=image, lessons=lessons)
+            except ValueError as e:
+                # The VLM occasionally flakes on a retry frame ("object not visible");
+                # the previous attempt's goal is a better bet than crashing out.
+                if prev_goal is None:
+                    raise
+                print(f"planner failed ({e}); reusing the previous attempt's goal")
+                goal = dict(prev_goal)
             if goal.get("thought"):
                 print(f"planner thinking: {goal['thought']}")
             # Apply the previous attempt's diagnosis (never overrides explicit flags).
             goal["object"] = corrections.get("object_phrase", goal["object"])
             goal["destination"] = corrections.get("destination_phrase", goal["destination"])
+        prev_goal = dict(goal)
         print(f"[attempt {attempt}] pick {goal['object']!r} -> place on {goal['destination']!r}")
 
         # 2. Ground to pixels (re-done every attempt: failed grasps move objects).
@@ -174,9 +195,16 @@ def main():
                 f"--duration={min(segment, args.duration - elapsed)}",
                 "--policy.discover_packages_path=point_act",
                 f"--policy.path={args.model}",
-                f"--policy.device={env.get('POLICY_DEVICE', 'cpu')}",
+                f"--policy.device={env.get('POLICY_DEVICE') or default_device()}",
                 "--inference.type=sync",
             ]
+            if elapsed + segment < args.duration:
+                # Mid-attempt segment boundary: hold pose and keep gripping — returning
+                # home or relaxing torque here would drop the object between segments.
+                cmd += [
+                    "--return_to_initial_position=false",
+                    "--robot.disable_torque_on_disconnect=false",
+                ]
             subprocess.run(cmd, check=True)
             elapsed += segment
 

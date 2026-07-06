@@ -19,6 +19,7 @@ Today was the big end-to-end day. Starting from the two assembled SO-101 arms, w
    chain of **6 errors** before training finally started, then switching it to use **both T4 GPUs**.
 
 Reused identifiers from Day 1 (`config.env` stores all of these):
+
 - `follower = /dev/tty.usbmodem5B421352311`  (id `my_follower`)
 - `leader   = /dev/tty.usbmodem5B420006171`  (id `my_leader`)
 - HF username: `fouad1233`
@@ -118,6 +119,7 @@ lerobot-record \
 ```
 
 **Keyboard controls during recording:**
+
 - `Right Arrow` → end the current episode early, go to the next.
 - `Left Arrow`  → cancel & re-record the current episode.
 - `Escape`      → stop and save the dataset.
@@ -144,7 +146,7 @@ api.create_repo("fouad1233/so101_pencil_pickup", repo_type="dataset", exist_ok=T
 api.upload_folder(folder_path=SRC, repo_id="fouad1233/so101_pencil_pickup", repo_type="dataset")
 ```
 
-Dataset: <https://huggingface.co/datasets/fouad1233/so101_pencil_pickup>
+Dataset: [https://huggingface.co/datasets/fouad1233/so101_pencil_pickup](https://huggingface.co/datasets/fouad1233/so101_pencil_pickup)
 
 > ⚠️ **Gotcha (bit us later on Kaggle):** `upload_folder` copies the files but **does not create the
 > codebase-version tag** (`v3.0`) that LeRobot's own `push_to_hub` would. LeRobot needs that tag to
@@ -166,7 +168,7 @@ kaggle auth login                          # browser, nothing to paste (recommen
 ./push_notebook_to_kaggle.sh               # = kaggle kernels push -p .
 ```
 
-Notebook: <https://www.kaggle.com/code/fouad1233/smolvla-pencil-pickup>
+Notebook: [https://www.kaggle.com/code/fouad1233/smolvla-pencil-pickup](https://www.kaggle.com/code/fouad1233/smolvla-pencil-pickup)
 
 The notebook's 6 steps: (1) `!nvidia-smi`, (2) install LeRobot, (3) HF login via the `HF_TOKEN` Kaggle
 secret, (4) settings, (5) fine-tune, (6) push the model to the Hub.
@@ -238,9 +240,11 @@ After blocker 6, training started:
 
 > 🧹 **Side gotcha — the Mac disk filled to 100%** mid-session (`ENOSPC`), which blocked even shell
 > output and a `git push`. Fix: clear regenerable caches (NOT the dataset):
+>
 > ```bash
 > rm -rf ~/Library/Caches/Homebrew ~/.cache/huggingface/hub      # freed ~7.3 GB
 > ```
+>
 > The recovered dataset under `~/.cache/huggingface/lerobot/` was left untouched.
 
 ### Part 9 — Use both T4 GPUs (multi-GPU)
@@ -303,15 +307,15 @@ api.upload_folder(folder_path=str(ckpt), repo_id=MODEL_REPO, repo_type="model")
 
 ### Gotchas summary (the 6 blockers, at a glance)
 
-| # | Error | Fix |
-|---|-------|-----|
-| 1 | `'av' is required` to decode videos | install `lerobot[smolvla,dataset]` |
-| 2 | CUDA `sm_60 not compatible` (P100) | use **GPU T4 x2** |
-| 3 | `'repo_id' argument missing` | `--policy.push_to_hub=false` |
+| # | Error                                      | Fix                                              |
+| - | ------------------------------------------ | ------------------------------------------------ |
+| 1 | `'av' is required` to decode videos      | install`lerobot[smolvla,dataset]`              |
+| 2 | CUDA`sm_60 not compatible` (P100)        | use**GPU T4 x2**                           |
+| 3 | `'repo_id' argument missing`             | `--policy.push_to_hub=false`                   |
 | 4 | `RevisionNotFoundError` (no version tag) | `create_tag(..., "v3.0", repo_type="dataset")` |
-| 5 | torchcodec / ffmpeg crash on video | `--dataset.video_backend=pyav` |
-| 6 | camera name mismatch | `--rename_map front→camera1` |
-| + | Mac disk full (`ENOSPC`) | clear Homebrew + HF hub caches |
+| 5 | torchcodec / ffmpeg crash on video         | `--dataset.video_backend=pyav`                 |
+| 6 | camera name mismatch                       | `--rename_map front→camera1`                  |
+| + | Mac disk full (`ENOSPC`)                 | clear Homebrew + HF hub caches                   |
 
 ### Next — Day 3
 
@@ -337,8 +341,8 @@ Bugün uçtan uca büyük gündü. Monte edilmiş iki SO-101 kolundan başlayara
 5. Veri seti üzerinde **Kaggle GPU not defteri** kullanarak **SmolVLA'yı fine-tune ettik** — eğitim
    nihayet başlamadan önce **6 hatadan** oluşan bir zincirle boğuştuk, sonra **iki T4 GPU'yu** birden
    kullanacak şekilde değiştirdik.
+6. Günden yeniden kullanılan kimlikler (hepsi `config.env` içinde):
 
-1. Günden yeniden kullanılan kimlikler (hepsi `config.env` içinde):
 - `follower = /dev/tty.usbmodem5B421352311`  (id `my_follower`)
 - `leader   = /dev/tty.usbmodem5B420006171`  (id `my_leader`)
 - HF kullanıcı adı: `fouad1233`
@@ -439,6 +443,7 @@ lerobot-record \
 ```
 
 **Kayıt sırasında klavye kontrolleri:**
+
 - `Sağ Ok` → mevcut bölümü erken bitir, sonrakine geç.
 - `Sol Ok`  → mevcut bölümü iptal et & yeniden kaydet.
 - `Escape`  → durdur ve veri setini kaydet.
@@ -464,7 +469,7 @@ api.create_repo("fouad1233/so101_pencil_pickup", repo_type="dataset", exist_ok=T
 api.upload_folder(folder_path=SRC, repo_id="fouad1233/so101_pencil_pickup", repo_type="dataset")
 ```
 
-Veri seti: <https://huggingface.co/datasets/fouad1233/so101_pencil_pickup>
+Veri seti: [https://huggingface.co/datasets/fouad1233/so101_pencil_pickup](https://huggingface.co/datasets/fouad1233/so101_pencil_pickup)
 
 > ⚠️ **Dikkat (sonradan Kaggle'da bizi yaktı):** `upload_folder` dosyaları kopyalar ama LeRobot'un kendi
 > `push_to_hub`'ının oluşturacağı **kod-tabanı sürüm etiketini** (`v3.0`) oluşturmaz. LeRobot veri seti
@@ -486,7 +491,7 @@ kaggle auth login                          # tarayıcı, yapıştıracak bir şe
 ./push_notebook_to_kaggle.sh               # = kaggle kernels push -p .
 ```
 
-Not defteri: <https://www.kaggle.com/code/fouad1233/smolvla-pencil-pickup>
+Not defteri: [https://www.kaggle.com/code/fouad1233/smolvla-pencil-pickup](https://www.kaggle.com/code/fouad1233/smolvla-pencil-pickup)
 
 Not defterinin 6 adımı: (1) `!nvidia-smi`, (2) LeRobot kurulumu, (3) `HF_TOKEN` Kaggle gizli anahtarıyla
 HF girişi, (4) ayarlar, (5) fine-tune, (6) modeli Hub'a gönder.
@@ -557,9 +562,11 @@ Engel 6'dan sonra eğitim başladı:
 
 > 🧹 **Yan dikkat — Mac diski %100 doldu** (`ENOSPC`); bu, kabuk çıktısını ve bir `git push`'u bile
 > engelledi. Çözüm: yeniden üretilebilir önbellekleri temizle (veri setini DEĞİL):
+>
 > ```bash
 > rm -rf ~/Library/Caches/Homebrew ~/.cache/huggingface/hub      # ~7.3 GB açtı
 > ```
+>
 > `~/.cache/huggingface/lerobot/` altındaki kurtarılan veri setine dokunulmadı.
 
 ### Bölüm 9 — İki T4 GPU'yu birden kullan (multi-GPU)
@@ -622,15 +629,15 @@ api.upload_folder(folder_path=str(ckpt), repo_id=MODEL_REPO, repo_type="model")
 
 ### Dikkat özeti (6 engel, tek bakışta)
 
-| # | Hata | Çözüm |
-|---|------|-------|
-| 1 | Video çözmek için `'av'` gerekli | `lerobot[smolvla,dataset]` kur |
-| 2 | CUDA `sm_60 not compatible` (P100) | **GPU T4 x2** kullan |
-| 3 | `'repo_id' argument missing` | `--policy.push_to_hub=false` |
+| # | Hata                                            | Çözüm                                         |
+| - | ----------------------------------------------- | ------------------------------------------------ |
+| 1 | Video çözmek için`'av'` gerekli            | `lerobot[smolvla,dataset]` kur                 |
+| 2 | CUDA`sm_60 not compatible` (P100)             | **GPU T4 x2** kullan                       |
+| 3 | `'repo_id' argument missing`                  | `--policy.push_to_hub=false`                   |
 | 4 | `RevisionNotFoundError` (sürüm etiketi yok) | `create_tag(..., "v3.0", repo_type="dataset")` |
-| 5 | videoda torchcodec / ffmpeg çökmesi | `--dataset.video_backend=pyav` |
-| 6 | kamera adı uyuşmazlığı | `--rename_map front→camera1` |
-| + | Mac diski dolu (`ENOSPC`) | Homebrew + HF hub önbelleklerini temizle |
+| 5 | videoda torchcodec / ffmpeg çökmesi           | `--dataset.video_backend=pyav`                 |
+| 6 | kamera adı uyuşmazlığı                     | `--rename_map front→camera1`                  |
+| + | Mac diski dolu (`ENOSPC`)                     | Homebrew + HF hub önbelleklerini temizle        |
 
 ### Sıradaki — 3. Gün
 

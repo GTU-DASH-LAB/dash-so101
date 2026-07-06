@@ -148,12 +148,25 @@ def diagnose(
             "cause": str(result.get("cause", "none")),
             "thought": thought[:300],
         }
+        # Keep only the correction matching the diagnosed cause. Small VLMs often emit
+        # extra fields (e.g. a pick_offset alongside cause=grounding_destination); applying
+        # those moves the pick marker off the object and poisons the next attempt.
+        allowed = {
+            "grounding_object": ("object_phrase",),
+            "grounding_destination": ("destination_phrase",),
+            "grasp_point": ("grasp_phrase", "pick_offset"),
+            "grip_force": ("effort",),
+        }.get(diag["cause"], ())
         for key in ("object_phrase", "destination_phrase", "grasp_phrase"):
-            if result.get(key):
+            if key in allowed and result.get(key):
                 diag[key] = str(result[key])
-        if isinstance(result.get("pick_offset"), (list, tuple)) and len(result["pick_offset"]) == 2:
+        if (
+            "pick_offset" in allowed
+            and isinstance(result.get("pick_offset"), (list, tuple))
+            and len(result["pick_offset"]) == 2
+        ):
             diag["pick_offset"] = [max(-0.08, min(0.08, float(d))) for d in result["pick_offset"]]
-        if result.get("effort") is not None:
+        if "effort" in allowed and result.get("effort") is not None:
             diag["effort"] = _clamp_effort(result["effort"])
         return diag
     except Exception:  # noqa: BLE001
@@ -264,7 +277,27 @@ def _selftest():
         _chat = real_chat
     assert diag["cause"] == "grasp_point" and "slipped" in diag["thought"]
     assert diag["pick_offset"] == [0.08, -0.01], diag["pick_offset"]  # clamped to ±0.08
-    assert diag["grasp_phrase"] == "the middle of the pen" and diag["effort"] == 1.3
+    assert diag["grasp_phrase"] == "the middle of the pen"
+    assert "effort" not in diag  # spurious field for this cause — filtered out
+
+    # A grounding_destination diagnosis must not leak a pick correction.
+    dest_reply = (
+        "<think>The pen went to the wrong spot; the detector found the wrong pad.</think>\n"
+        '{"success": false, "note": "wrong destination", "cause": "grounding_destination", '
+        '"destination_phrase": "the large black mouse pad", "pick_offset": [0.08, 0.05]}'
+    )
+    _chat = lambda messages, max_tokens=700: dest_reply  # noqa: E731
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png") as f:
+            f.write(b"fake png bytes")
+            f.flush()
+            diag = diagnose(
+                "put the pen on the pad", f.name, f.name, (0.7, 0.8), (0.4, 0.8), "0.3 away"
+            )
+    finally:
+        _chat = real_chat
+    assert diag["destination_phrase"] == "the large black mouse pad"
+    assert "pick_offset" not in diag and "grasp_phrase" not in diag
 
     # Nested JSON (decompose) survives think-tag stripping and prose around it.
     nested = (
