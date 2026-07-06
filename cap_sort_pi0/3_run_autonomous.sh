@@ -53,11 +53,10 @@ lerobot-rollout \
   --robot.type=so101_follower \
   --robot.port="$FOLLOWER_PORT" \
   --robot.id="$FOLLOWER_ID" \
-  --robot.max_relative_target=5 \
+  --robot.max_relative_target="$MAX_RELATIVE_TARGET" \
   --robot.cameras="$CAMERAS" \
   --task="$TASK" \
   --policy.path="$POLICY_PATH" \
   --policy.use_peft=true \
   --policy.device=cuda \
-  --inference.type=rtc \
   --display_data=true
