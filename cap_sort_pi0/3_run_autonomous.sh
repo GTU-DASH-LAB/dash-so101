@@ -5,6 +5,12 @@
 # the task. No leader arm needed here.
 #
 # SAFETY: keep a hand near the power switch the first time.
+# --robot.max_relative_target caps how far each joint may move per step, so
+# raw per-step policy noise (especially at chunk boundaries) can't translate
+# into a large, fast, unstable jump -- only RTC's own smoothing shapes motion
+# otherwise. (Unlike ball_pickup_pi0, which has this clamp removed at the
+# user's explicit request for that script specifically -- not carried over
+# here on purpose.)
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -47,6 +53,7 @@ lerobot-rollout \
   --robot.type=so101_follower \
   --robot.port="$FOLLOWER_PORT" \
   --robot.id="$FOLLOWER_ID" \
+  --robot.max_relative_target=5 \
   --robot.cameras="$CAMERAS" \
   --task="$TASK" \
   --policy.path="$POLICY_PATH" \

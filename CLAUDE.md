@@ -177,6 +177,18 @@ is the single source of truth — in particular the cameras block must be
 
 ### `cap_sort_pi0` — LoRA fine-tuning
 
+- **`ball_pickup_pi0`'s missing `--robot.max_relative_target` is specific to
+  that script, not a project-wide default** — it was removed there at the
+  user's explicit request for that one task. Copying `3_run_autonomous.sh`'s
+  *current* content into a new task folder without re-adding the clamp
+  produces large/fast/unstable arm motion at inference time (raw per-step RTC
+  action noise, especially at chunk boundaries, translates directly into
+  full-speed servo jumps with nothing capping it) — this is what happened
+  when `cap_sort_pi0/3_run_autonomous.sh` was first written, even though the
+  trained policy itself was fine. Fixed by adding back
+  `--robot.max_relative_target=5`. Default to including this clamp in any
+  *new* task's run script; only omit it if the user asks for that task
+  specifically.
 - **`--policy.use_peft` does NOT turn on LoRA training** — that flag is only
   for loading an *existing* PEFT adapter checkpoint on resume/inference
   (`lerobot/policies/factory.py`'s `cfg.pretrained_path and cfg.use_peft`
