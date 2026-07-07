@@ -1,4 +1,4 @@
-# fouad_so101
+# dash-so101
 
 My journey building and learning with the **SO-101** robotic arms and Vision-Language-Action (VLA) models.
 
@@ -12,7 +12,7 @@ My journey building and learning with the **SO-101** robotic arms and Vision-Lan
 Clone with the submodule:
 
 ```bash
-git clone --recurse-submodules https://github.com/fouad1233/fouad_so101.git
+git clone --recurse-submodules https://github.com/GTU-DASH-LAB/dash-so101.git
 ```
 
 If you already cloned without `--recurse-submodules`:
@@ -39,3 +39,8 @@ cd ..
 git add lerobot
 git commit -m "Update lerobot submodule"
 ```
+
+## Contributors
+
+- **[Fouad Aladhami](https://github.com/fouad1233)** — project owner/maintainer: SO-101 hardware, data
+  collection, fine-tuning pipelines, and daily progress notes.

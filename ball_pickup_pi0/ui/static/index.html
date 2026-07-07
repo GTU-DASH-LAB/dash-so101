@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ball_pickup_pi0 control</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    font-family: -apple-system, system-ui, sans-serif;
+    background: #14161a; color: #e6e6e6; margin: 0; padding: 20px;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: #9aa0a6; font-size: 13px; margin-bottom: 16px; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .cameras { display: flex; gap: 12px; margin-bottom: 16px; }
+  .cam-box { background: #000; border-radius: 8px; overflow: hidden; border: 1px solid #2a2d33; }
+  .cam-box img { display: block; width: 480px; max-width: 44vw; height: auto; }
+  .cam-label { font-size: 12px; color: #9aa0a6; padding: 4px 8px; background: #1c1f24; }
+  .panel {
+    background: #1c1f24; border: 1px solid #2a2d33; border-radius: 8px;
+    padding: 14px 16px; margin-bottom: 16px;
+  }
+  .status-line { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .badge {
+    display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  }
+  .badge.idle { background: #3a3d42; color: #ccc; }
+  .badge.running { background: #1e5c2e; color: #7ee08a; }
+  .badge.paused { background: #5c4a1e; color: #f0c766; }
+  .badge.manual { background: #1e3f5c; color: #7cc0f0; }
+  .badge.resetting { background: #4a1e5c; color: #d38af0; }
+  .meta { font-size: 12px; color: #9aa0a6; }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    background: #2a2d33; color: #e6e6e6; border: 1px solid #3a3d42; border-radius: 6px;
+    padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  button:hover { background: #34383f; }
+  button:active { transform: translateY(1px); }
+  button.start { border-color: #1e5c2e; }
+  button.start:hover { background: #1e5c2e33; }
+  button.pause { border-color: #5c4a1e; }
+  button.pause:hover { background: #5c4a1e33; }
+  button.manual { border-color: #1e3f5c; }
+  button.manual:hover { background: #1e3f5c33; }
+  button.reset { border-color: #4a1e5c; }
+  button.reset:hover { background: #4a1e5c33; }
+  button.complete { border-color: #6a5c1e; }
+  button.complete:hover { background: #6a5c1e33; }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  .joint-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+  .joint-row label { width: 110px; font-size: 13px; color: #ccc; }
+  .joint-row input[type=range] { flex: 1; }
+  .joint-row .val { width: 60px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: #9aa0a6; }
+  .error { color: #f07070; font-size: 13px; margin-top: 8px; }
+  .hint { font-size: 12px; color: #6b7075; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <h1>ball_pickup_pi0 &mdash; live control</h1>
+  <div class="sub" id="task-line">loading&hellip;</div>
+
+  <div class="cameras">
+    <div class="cam-box">
+      <div class="cam-label">top (base_0_rgb)</div>
+      <img src="/video/base_0_rgb">
+    </div>
+    <div class="cam-box">
+      <div class="cam-label">wrist (left_wrist_0_rgb)</div>
+      <img src="/video/left_wrist_0_rgb">
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="status-line">
+      <span class="badge idle" id="mode-badge">idle</span>
+      <span class="meta" id="meta-line"></span>
+    </div>
+    <div class="buttons">
+      <button class="start" onclick="post('/control/start')">Start</button>
+      <button class="pause" onclick="post('/control/pause')">Pause</button>
+      <button class="complete" onclick="post('/control/complete')">Complete</button>
+      <button class="manual" onclick="enterManual()">Manual control</button>
+      <button class="reset" onclick="post('/control/reset')">Reset to home</button>
+    </div>
+    <div class="error" id="error-line"></div>
+  </div>
+
+  <div class="panel" id="manual-panel">
+    <div class="sub" style="margin-bottom:10px">Manual jog (click "Manual control" to enable)</div>
+    <div id="joint-sliders"></div>
+    <div class="hint">Sliders are capped to &plusmn;60&deg; from wherever manual mode started, and every
+      move is rate-limited by the server (5&deg;/tick) &mdash; the arm eases toward each target rather than jumping.
+      This is independent of autonomous mode, which uses the same unclamped RTC inference as 3_run_autonomous.sh.</div>
+  </div>
+
+<script>
+const JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"];
+let mode = "idle";
+
+function post(path, body) {
+  return fetch(path, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: body ? JSON.stringify(body) : undefined,
+  }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || r.statusText); }); return r.json(); })
+    .catch(e => { document.getElementById("error-line").textContent = e.message; });
+}
+
+// Slider min/max are centered on wherever the arm actually is at the moment
+// manual mode is entered (matches the server's MANUAL_SLIDER_SPAN clamp of
+// ±60° from that same center) -- not a fixed absolute range, so there's no
+// dead zone and no surprise jump.
+function enterManual() {
+  post('/control/manual').then(res => {
+    if (res && res.manual_targets) buildSliders(res.manual_targets);
+  });
+}
+
+function buildSliders(centers) {
+  const container = document.getElementById("joint-sliders");
+  container.innerHTML = "";
+  JOINTS.forEach(name => {
+    const center = (centers && centers[name] !== undefined) ? centers[name] : 0;
+    const row = document.createElement("div");
+    row.className = "joint-row";
+    row.innerHTML = `
+      <label>${name}</label>
+      <input type="range" min="${(center - 60).toFixed(1)}" max="${(center + 60).toFixed(1)}"
+             step="0.5" value="${center.toFixed(1)}" id="slider-${name}" ${mode !== "manual" ? "disabled" : ""}>
+      <span class="val" id="val-${name}">${center.toFixed(1)}°</span>`;
+    container.appendChild(row);
+    const slider = row.querySelector("input");
+    slider.addEventListener("input", () => {
+      document.getElementById(`val-${name}`).textContent = Number(slider.value).toFixed(1) + "°";
+      post(`/joint/${name}`, { value: parseFloat(slider.value) });
+    });
+  });
+}
+buildSliders();
+
+async function poll() {
+  try {
+    const r = await fetch('/status');
+    const s = await r.json();
+    mode = s.mode;
+    const badge = document.getElementById("mode-badge");
+    badge.textContent = mode;
+    badge.className = "badge " + mode;
+    document.getElementById("task-line").textContent =
+      `task: "${s.task}"  |  policy: ${s.policy_path}  |  uptime: ${Math.round(s.uptime_s)}s  |  episodes completed: ${s.episodes_completed}`;
+    document.getElementById("meta-line").textContent =
+      Object.entries(s.joint_positions).map(([k, v]) => `${k}: ${v.toFixed(1)}°`).join("   ");
+    document.getElementById("error-line").textContent = s.last_error ? ("Error: " + s.last_error) : "";
+
+    // Sliders are only interactive in manual mode; outside of it they stay
+    // wherever they were last built and the meta-line above shows the live
+    // actual position instead (avoids fighting the user's drag with resync).
+    JOINTS.forEach(name => {
+      const slider = document.getElementById(`slider-${name}`);
+      if (slider) slider.disabled = (mode !== "manual");
+    });
+  } catch (e) {
+    document.getElementById("error-line").textContent = "Lost connection to server.";
+  }
+  setTimeout(poll, 500);
+}
+poll();
+</script>
+</body>
+</html>
