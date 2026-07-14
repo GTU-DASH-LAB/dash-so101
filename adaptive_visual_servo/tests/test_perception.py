@@ -7,8 +7,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import ServoConfig
-from perception import (PatchTracker, blink_locate, detect_objects, detect_pad,
-                        pick_by_hue)
+from perception import blink_locate, detect_objects, detect_pad, locate_by_diff, pick_by_hue
 from sim import SimWorld
 
 SCFG = ServoConfig()
@@ -63,22 +62,41 @@ def test_blink_locate():
         assert err < 8, f"blink {err:.1f}px off ground truth (seed {seed})"
 
 
-def test_patch_tracker():
+def test_locate_by_diff_tracks_carried_object():
     w = SimWorld(seed=16)
-    start = blink_locate(w, SCFG)
-    tracker = PatchTracker(w.read(), start, SCFG.patch_size, SCFG.roi_size,
-                           SCFG.match_min)
+    bg = w.capture_background()
+    (o,) = w.spawn_random(1)
+    from sim import solve_ik_true
+    q = solve_ik_true(w, np.array([o.pos[0], o.pos[1], w.cfg.grasp_ee_z]))
+    w.set_q(q)
+    w.set_gripper(0.1)
+    assert w.gripper_contact(), "setup: grasp must succeed for this test"
+    s = w.grip_px()
     rng = np.random.default_rng(0)
-    for _ in range(6):
-        w.set_q(w.get_q() + rng.uniform(-0.03, 0.03, 3))
-        pos, score = tracker.update(w.read())
-    err = np.linalg.norm(pos - w.grip_px())
-    assert err < 10, f"tracker drifted {err:.1f}px after 6 moves"
+    for _ in range(8):
+        w.set_q(w.get_q() + rng.uniform(-0.05, 0.05, 3))
+        pred = s  # a real caller would predict via J @ dq; ground truth stands in here
+        s = locate_by_diff(w.read(), bg, pred, SCFG.track_roi, SCFG.bg_thresh,
+                           SCFG.obj_min_area, SCFG.track_max_jump)
+        assert s is not None, "lost the carried object mid-transport"
+    err = np.linalg.norm(s - w.grip_px())
+    assert err < 20, f"bg-diff drifted {err:.1f}px after 8 moves"
+
+
+def test_locate_by_diff_rejects_distant_distractor():
+    w = SimWorld(seed=17)
+    bg = w.capture_background()
+    w.spawn_object((0.16, 0.06), 0.013, "circle", (40, 200, 40))  # untouched distractor
+    ee_px = w.grip_px()
+    far_prediction = ee_px + np.array([300.0, 0.0])  # nowhere near the arm or the distractor
+    assert locate_by_diff(w.read(), bg, far_prediction, SCFG.track_roi, SCFG.bg_thresh,
+                          SCFG.obj_min_area, SCFG.track_max_jump) is None
 
 
 if __name__ == "__main__":
     for fn in [test_detect_objects_any_color, test_pad_and_hue_selection,
-               test_blink_locate, test_patch_tracker]:
+               test_blink_locate, test_locate_by_diff_tracks_carried_object,
+               test_locate_by_diff_rejects_distant_distractor]:
         fn()
         print(f"ok {fn.__name__}")
     print("ALL OK")

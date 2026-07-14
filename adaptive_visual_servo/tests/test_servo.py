@@ -10,8 +10,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import ServoConfig
 from control import babble, servo_to
-from perception import PatchTracker, blink_locate, detect_objects
-from sim import SimWorld
+from perception import blink_locate, detect_objects, locate_by_diff
+from sim import SimWorld, solve_ik_true
 
 SCFG = ServoConfig()
 
@@ -56,15 +56,26 @@ def test_watchdog_on_unreachable():
 
 
 def test_tracker_based_servo():
+    # carry-phase precondition: something is actually grasped, matching how
+    # run_episode uses locate_by_diff (never called with an empty hand).
     w = SimWorld(seed=35)
+    bg = w.capture_background()
+    (o,) = w.spawn_random(1)
     J, s = babble(w, SCFG, np.random.default_rng(35))
-    tracker = PatchTracker(w.read(), s, SCFG.patch_size, SCFG.roi_size,
-                           SCFG.match_min)
-    target = w.cam.project(np.array([0.16, 0.05, 0.04]))
-    loc = lambda pred: tracker.update(w.read(), pred)[0]
+    q = solve_ik_true(w, np.array([o.pos[0], o.pos[1], w.cfg.grasp_ee_z]))
+    w.set_q(q)
+    w.set_gripper(0.1)
+    assert w.gripper_contact(), "setup: grasp must succeed for this test"
+    s = w.grip_px()
+    target = w.cam.project(np.array([0.10, 0.15, 0.05]))  # over the drop pad
+    loc = lambda pred: locate_by_diff(w.read(), bg, pred, SCFG.track_roi,
+                                      SCFG.bg_thresh, SCFG.obj_min_area,
+                                      SCFG.track_max_jump)
     ok, J, s = servo_to(w, SCFG, J, s, target, loc, SCFG.tol_coarse_px)
     assert ok, "tracker-based servo did not converge"
-    assert np.linalg.norm(w.grip_px() - target) < SCFG.tol_coarse_px + 6
+    # bg-diff centroids the whole carried-object blob, not the bare EE point,
+    # so its bias against the analytic grip point is larger than blink's
+    assert np.linalg.norm(w.grip_px() - target) < 45
 
 
 if __name__ == "__main__":

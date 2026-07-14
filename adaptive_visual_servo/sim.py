@@ -68,6 +68,14 @@ class NominalModel:
         self.l1 = cfg.link1 * (1 + rng.uniform(-e, e))
         self.l2 = cfg.link2 * (1 + rng.uniform(-e, e))
 
+    @classmethod
+    def from_lengths(cls, link_base, link1, link2):
+        """Build directly from a (possibly hand-measured) link-length guess,
+        e.g. for real hardware where there's no ground truth to perturb."""
+        m = cls.__new__(cls)
+        m.lb, m.l1, m.l2 = link_base, link1, link2
+        return m
+
     def ee(self, q):
         return fk_points(q, self.lb, self.l1, self.l2)[3]
 

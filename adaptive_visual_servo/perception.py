@@ -41,14 +41,18 @@ def find_blobs(mask, min_area, frame=None):
     return out
 
 
-def detect_objects(frame, background, thresh=28, min_area=80, exclude=(), exclude_r=30):
+def detect_objects(frame, background, thresh=28, min_area=80, exclude=(),
+                   exclude_r=30, max_area=None):
     """Any new blob vs. the empty-workspace photo = an object (color-agnostic).
 
-    `exclude`: pixel points (e.g. current EE) whose vicinity is ignored.
+    `exclude`: pixel points (e.g. current EE, the pad) whose vicinity is ignored.
+    `max_area` filters out arm-sized blobs when detecting with the arm in view.
     """
     blobs = find_blobs(diff_mask(frame, background, thresh), min_area, frame)
     return [b for b in blobs
-            if all(np.linalg.norm(b.center - np.asarray(p)) > exclude_r for p in exclude)]
+            if (max_area is None or b.area <= max_area)
+            and all(np.linalg.norm(b.center - np.asarray(p)) > exclude_r
+                    for p in exclude)]
 
 
 def _hue_dist(h1, h2):
@@ -103,37 +107,32 @@ def blink_locate(rig, scfg):
     return (weights @ centers) / weights.sum()
 
 
-class PatchTracker:
-    """Grayscale template tracking in a local ROI, for the carry phase (when the
-    gripper can't blink). Falls back to the caller's motion prediction when the
-    match is weak; template is refreshed after every good match."""
+def locate_by_diff(frame, background, center, roi=80, thresh=28, min_area=30, max_jump=25.0):
+    """Background-subtraction localization of the carried gripper+object in a
+    local ROI around `center` (the kinematic prediction s + J@dq) -- for the
+    carry phase, when the gripper can't blink to re-anchor.
 
-    def __init__(self, frame, center, patch=42, roi=140, match_min=0.35):
-        self.patch, self.roi, self.match_min = patch, roi, match_min
-        self.pos = np.asarray(center, float)
-        self.tmpl = self._crop(frame, self.pos, patch)
-
-    @staticmethod
-    def _crop(frame, center, size):
-        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        h, w = g.shape
-        x0 = int(np.clip(center[0] - size / 2, 0, w - size))
-        y0 = int(np.clip(center[1] - size / 2, 0, h - size))
-        return g[y0:y0 + size, x0:x0 + size]
-
-    def update(self, frame, predicted=None):
-        base = np.asarray(predicted, float) if predicted is not None else self.pos
-        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        h, w = g.shape
-        x0 = int(np.clip(base[0] - self.roi / 2, 0, w - self.roi))
-        y0 = int(np.clip(base[1] - self.roi / 2, 0, h - self.roi))
-        res = cv2.matchTemplate(g[y0:y0 + self.roi, x0:x0 + self.roi],
-                                self.tmpl, cv2.TM_CCOEFF_NORMED)
-        _, score, _, loc = cv2.minMaxLoc(res)
-        if score >= self.match_min:
-            self.pos = np.array([x0 + loc[0] + self.patch / 2,
-                                 y0 + loc[1] + self.patch / 2], float)
-            self.tmpl = self._crop(frame, self.pos, self.patch)
-        else:
-            self.pos = base  # trust the motion model this step
-        return self.pos.copy(), float(score)
+    Unlike template matching, this is invariant to the rotation/viewing-angle
+    appearance changes a long transport puts the carried object through: it
+    only asks "did this pixel change from the known-empty background", never
+    what the object looks like, so there's no template to drift or go stale.
+    Returns None (not a stale guess) when nothing plausible is found, so the
+    caller's own blind-step handling (servo_to) decides how much of that to
+    tolerate. `max_jump` rejects a distractor blob (e.g. another not-yet-picked
+    object) that happens to land inside the ROI -- a rigidly-held object's
+    per-step motion is bounded by the joint-step clamp, so the true target is
+    always the blob nearest the prediction, not just any new blob.
+    """
+    h, w = frame.shape[:2]
+    r = roi // 2
+    x0 = int(np.clip(center[0] - r, 0, w - roi))
+    y0 = int(np.clip(center[1] - r, 0, h - roi))
+    blobs = find_blobs(diff_mask(frame[y0:y0 + roi, x0:x0 + roi],
+                                 background[y0:y0 + roi, x0:x0 + roi], thresh), min_area)
+    if not blobs:
+        return None
+    c = np.array([roi / 2.0, roi / 2.0])
+    best = min(blobs, key=lambda b: np.linalg.norm(b.center - c))
+    if np.linalg.norm(best.center - c) > max_jump:
+        return None
+    return best.center + np.array([x0, y0])

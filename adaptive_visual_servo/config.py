@@ -58,8 +58,10 @@ class ServoConfig:
     # descend
     approach_dz: float = 0.02       # descend increment between XY re-servos
     approach_z: float = 0.075       # nominal EE height for the coarse approach
+    grasp_z: float = 0.030          # nominal EE height to close the gripper at
     lift_z: float = 0.09
     release_z: float = 0.055
+    obj_max_area: int = 3500        # px^2; larger diff blobs are the arm, not objects
     # perception
     blink_dg: tuple = (1.0, 0.4)    # gripper open values toggled to blink
                                     # (g_mid must stay above SimConfig.grip_close)
@@ -71,9 +73,8 @@ class ServoConfig:
     obj_min_area: int = 80
     pad_hue: int = 165              # OpenCV hue of the pink drop pad
     hue_tol: int = 14
-    patch_size: int = 42
-    roi_size: int = 140
-    match_min: float = 0.35
+    track_roi: int = 80              # bg-diff search window during carry (locate_by_diff)
+    track_max_jump: float = 25.0     # reject a diff blob this far from the kinematic prediction
     retries: int = 2                # grasp retries per episode
 
 
@@ -98,3 +99,10 @@ class RealConfig:
     # soft joint limits (deg) enforced on top of firmware limits
     q_min_deg: tuple = (-90.0, 5.0, -135.0)
     q_max_deg: tuple = (90.0, 85.0, -10.0)
+    # nominal link lengths (m) for the open-loop Z descend ONLY -- XY stays
+    # visually closed, so like the sim's model_error these are allowed to be
+    # wrong. Defaults are the same SO-101-ish guess sim.py's SimConfig uses;
+    # measure your actual arm and override here if descend steps feel off.
+    link_base: float = 0.05
+    link1: float = 0.11
+    link2: float = 0.14

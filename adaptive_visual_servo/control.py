@@ -11,7 +11,8 @@ Robot interface (duck-typed; SimWorld and the real adapter both provide it):
 
 import numpy as np
 
-from perception import blink_locate
+from perception import (blink_locate, detect_objects, detect_pad, locate_by_diff,
+                        pick_by_hue)
 
 
 def damped_pinv(J, damping=1e-2):
@@ -63,12 +64,17 @@ def babble(rig, scfg, rng):
     return Jt.T, s
 
 
-def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px):
+def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px, shape_dq=None):
     """Closed-loop image servo: drive the EE pixel onto target_px.
 
     `locate(predicted_px) -> px | None` measures the EE after each move (blink
     while the hand is free, patch tracker while carrying). J is Broyden-updated
     every step; a no-improvement watchdog aborts instead of oscillating.
+
+    `shape_dq(q) -> dq_extra` adds a correction to every step — used to hold
+    height with the nominal model, because a pixel target is a whole 3D camera
+    ray: without it the null space lets the EE slide down the ray into the
+    table. Broyden stays consistent (it sees the executed dq).
     Returns (ok, J, s_ee).
     """
     target = np.asarray(target_px, float)
@@ -88,6 +94,8 @@ def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px):
         dq = damped_pinv(J, scfg.damping) @ (scfg.lam * e)
         dq = np.clip(dq, -scfg.dq_max, scfg.dq_max)
         q_before = rig.get_q()
+        if shape_dq is not None:
+            dq = np.clip(dq + shape_dq(q_before), -0.2, 0.2)
         rig.set_q(q_before + dq)
         dq_actual = rig.get_q() - q_before  # post-clamp truth
         s_pred = s_ee + J @ dq_actual
@@ -108,3 +116,170 @@ def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px):
                            scfg.broyden_beta, scfg.min_dq)
         s_ee = s_new
     return False, J, s_ee
+
+
+def nominal_z_to(rig, model, z_target, scfg, after_step=None):
+    """Open-loop height change using the (deliberately imperfect) nominal
+    model — the only place any kinematic model is used. XY stays visually
+    closed elsewhere. Returns False if jammed (joint limits)."""
+    for _ in range(30):
+        q = rig.get_q()
+        dz = z_target - model.ee(q)[2]
+        if abs(dz) < 0.004:
+            return True
+        dq = model.step_dz(q, float(np.clip(dz, -scfg.approach_dz, scfg.approach_dz)))
+        rig.set_q(q + np.clip(dq, -0.2, 0.2))
+        dq_actual = rig.get_q() - q
+        if np.linalg.norm(dq_actual) < 1e-5:
+            return False
+        if after_step is not None:
+            after_step(dq_actual)
+    return False
+
+
+def run_episode(rig, model, scfg, background, rng,
+                target_hue=None, detector=None, J=None):
+    """One pick-and-place: DETECT -> (BABBLE) -> SERVO_XY -> interleaved
+    DESCEND -> GRASP -> LIFT -> TRANSPORT -> lower+re-servo -> RELEASE -> HOME.
+
+    `background`: the one-time empty-workspace photo.
+    `target_hue`: optional 'pick the <color> one' selector (OpenCV hue).
+    `detector`: optional plug-in `f(frame) -> [Blob]` (e.g. a learned model)
+    replacing background subtraction.
+    `J`: reuse a Jacobian from a previous episode; babbles fresh if None.
+    Returns dict(ok, reason, J).
+    """
+    home_q = rig.get_q()
+
+    def fail(reason):
+        rig.set_gripper(1.0)
+        return dict(ok=False, reason=reason, J=J)
+
+    frame = rig.read()
+    pad_px = detect_pad(frame, scfg.pad_hue, scfg.hue_tol)
+    if pad_px is None:
+        return fail("drop pad not found")
+
+    def find_objects(fr, extra_exclude=()):
+        blobs = (detector(fr) if detector is not None else
+                 detect_objects(fr, background, scfg.bg_thresh, scfg.obj_min_area,
+                                max_area=scfg.obj_max_area))
+        excl = [pad_px, *extra_exclude]
+        return [b for b in blobs
+                if all(np.linalg.norm(b.center - np.asarray(p)) > 60 for p in excl)]
+
+    blobs = find_objects(frame)
+    if not blobs:
+        return fail("no objects detected")
+    tgt = (pick_by_hue(blobs, target_hue, scfg.hue_tol)
+           if target_hue is not None else blobs[0])
+    if tgt is None:
+        return fail("no object matches requested hue")
+    obj_px = np.asarray(tgt.center)
+
+    if J is None:
+        J, s = babble(rig, scfg, rng)
+    else:
+        s = blink_locate(rig, scfg)
+        if s is None:
+            J, s = babble(rig, scfg, rng)
+
+    def bl(pred):
+        return blink_locate(rig, scfg)
+
+    def z_hold(z_ref):
+        """Per-step correction keeping nominal height at z_ref while the
+        image loop owns XY (see servo_to.shape_dq)."""
+        def f(q):
+            dz = float(np.clip(0.6 * (z_ref - model.ee(q)[2]),
+                               -scfg.approach_dz, scfg.approach_dz))
+            return model.step_dz(q, dz)
+        return f
+
+    def servo_recover(target, tol, hold):
+        """Servo with escalating recovery: re-anchor blink, then re-babble."""
+        nonlocal J, s
+        ok, J, s = servo_to(rig, scfg, J, s, target, bl, tol, shape_dq=hold)
+        if ok:
+            return True
+        s2 = blink_locate(rig, scfg)
+        if s2 is not None:
+            s = s2
+        ok, J, s = servo_to(rig, scfg, J, s, target, bl, tol, shape_dq=hold)
+        if ok:
+            return True
+        J, s = babble(rig, scfg, rng)
+        ok, J, s = servo_to(rig, scfg, J, s, target, bl, tol, shape_dq=hold)
+        return ok
+
+    # ---- approach + descend + grasp, with retries ----
+    grasped = False
+    for attempt in range(scfg.retries + 1):
+        nominal_z_to(rig, model, scfg.approach_z, scfg)
+        s_up = blink_locate(rig, scfg)
+        if s_up is not None:
+            s = s_up
+        if not servo_recover(obj_px, scfg.tol_coarse_px, z_hold(scfg.approach_z)):
+            return fail("approach servo failed")
+        # interleaved descend: parallax shrinks as height drops
+        ok_descend = True
+        while True:
+            z = model.ee(rig.get_q())[2]
+            if z <= scfg.grasp_z + 0.004:
+                break
+            stage = max(scfg.grasp_z, z - scfg.approach_dz)
+            nominal_z_to(rig, model, stage, scfg)
+            s2 = blink_locate(rig, scfg)
+            if s2 is not None:
+                s = s2
+            if not servo_recover(obj_px, scfg.tol_fine_px, z_hold(stage)):
+                ok_descend = False
+                break
+        if ok_descend:
+            rig.set_gripper(0.0)
+            if rig.gripper_contact():
+                grasped = True
+                break
+        # retry: reopen, rise, re-find the object (it may have been nudged)
+        rig.set_gripper(1.0)
+        nominal_z_to(rig, model, scfg.approach_z, scfg)
+        blobs = find_objects(rig.read(), extra_exclude=(s,))
+        if blobs:
+            tgt = (pick_by_hue(blobs, target_hue, scfg.hue_tol)
+                   if target_hue is not None else
+                   min(blobs, key=lambda b: np.linalg.norm(b.center - obj_px)))
+            if tgt is not None:
+                obj_px = np.asarray(tgt.center)
+    if not grasped:
+        return fail("grasp failed after retries")
+
+    # ---- lift, tracking the hand+object via bg-diff (no blinking while holding) ----
+    def track_step(dq):
+        nonlocal s
+        pred = s + J @ dq
+        new_s = locate_by_diff(rig.read(), background, pred, scfg.track_roi,
+                               scfg.bg_thresh, scfg.obj_min_area, scfg.track_max_jump)
+        s = new_s if new_s is not None else pred
+
+    nominal_z_to(rig, model, scfg.lift_z, scfg, after_step=track_step)
+    if not rig.gripper_contact():
+        return fail("object dropped during lift")
+
+    def tr(pred):
+        return locate_by_diff(rig.read(), background, pred, scfg.track_roi,
+                              scfg.bg_thresh, scfg.obj_min_area, scfg.track_max_jump)
+
+    ok, J, s = servo_to(rig, scfg, J, s, pad_px, tr, scfg.tol_coarse_px,
+                        shape_dq=z_hold(scfg.lift_z))
+    if not ok:
+        return fail("transport servo failed")
+    # lower over the pad and re-servo: kills the remaining parallax offset
+    nominal_z_to(rig, model, scfg.release_z, scfg, after_step=track_step)
+    ok, J, s = servo_to(rig, scfg, J, s, pad_px, tr, scfg.tol_coarse_px,
+                        shape_dq=z_hold(scfg.release_z))
+    rig.set_gripper(1.0)
+    nominal_z_to(rig, model, scfg.lift_z, scfg)
+    q = rig.get_q()
+    for a in np.linspace(0.2, 1.0, 5):
+        rig.set_q(q + a * (home_q - q))
+    return dict(ok=True, reason="released over pad", J=J)
