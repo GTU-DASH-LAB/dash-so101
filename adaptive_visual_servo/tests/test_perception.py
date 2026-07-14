@@ -1,0 +1,84 @@
+"""Perception vs. sim ground truth: detection, hue selection, blink, tracking."""
+
+import os
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import ServoConfig
+from perception import (PatchTracker, blink_locate, detect_objects, detect_pad,
+                        pick_by_hue)
+from sim import SimWorld
+
+SCFG = ServoConfig()
+
+
+def test_detect_objects_any_color():
+    w = SimWorld(seed=10)
+    bg = w.capture_background()
+    w.spawn_random(3)
+    found = detect_objects(w.read(), bg, SCFG.bg_thresh, SCFG.obj_min_area)
+    assert len(found) == 3, f"expected 3 objects, got {len(found)}"
+    for o in w.objects:
+        true_px = w.cam.project(o.pos)
+        d = min(np.linalg.norm(b.center - true_px) for b in found)
+        assert d < 6, f"object at {true_px} localized {d:.1f}px off"
+    # gray objects must be detected too (seed 10 may not have one; force it)
+    w2 = SimWorld(seed=11)
+    bg2 = w2.capture_background()
+    w2.spawn_object((0.16, 0.02), 0.013, "blob", (90, 90, 90))
+    got = detect_objects(w2.read(), bg2, SCFG.bg_thresh, SCFG.obj_min_area)
+    assert len(got) == 1, "colorless object missed by bg-sub"
+
+
+def test_pad_and_hue_selection():
+    w = SimWorld(seed=12)
+    w.spawn_object((0.17, -0.03), 0.013, "circle", (30, 30, 210))   # red
+    w.spawn_object((0.15, 0.06), 0.013, "circle", (40, 200, 40))    # green
+    bg = w.capture_background()
+    frame = w.read()
+    pad_px = detect_pad(frame, SCFG.pad_hue, SCFG.hue_tol)
+    assert pad_px is not None
+    assert np.linalg.norm(pad_px - w.cam.project(w.pad)) < 6
+    found = detect_objects(frame, bg, SCFG.bg_thresh, SCFG.obj_min_area)
+    red = pick_by_hue(found, 0)
+    green = pick_by_hue(found, 60)
+    assert red is not None and green is not None
+    assert np.linalg.norm(red.center - w.cam.project(w.objects[0].pos)) < 6
+    assert np.linalg.norm(green.center - w.cam.project(w.objects[1].pos)) < 6
+    # a hue nothing matches -> None
+    assert pick_by_hue(found, 120) is None
+
+
+def test_blink_locate():
+    for seed, dq in [(13, None), (14, np.array([0.5, -0.2, 0.3])),
+                     (15, np.array([-0.3, 0.3, -0.4]))]:
+        w = SimWorld(seed=seed)
+        if dq is not None:
+            w.set_q(np.array(w.cfg.home_q) + dq)
+        px = blink_locate(w, SCFG)
+        assert px is not None, f"blink found nothing (seed {seed})"
+        err = np.linalg.norm(px - w.grip_px())
+        assert err < 8, f"blink {err:.1f}px off ground truth (seed {seed})"
+
+
+def test_patch_tracker():
+    w = SimWorld(seed=16)
+    start = blink_locate(w, SCFG)
+    tracker = PatchTracker(w.read(), start, SCFG.patch_size, SCFG.roi_size,
+                           SCFG.match_min)
+    rng = np.random.default_rng(0)
+    for _ in range(6):
+        w.set_q(w.get_q() + rng.uniform(-0.03, 0.03, 3))
+        pos, score = tracker.update(w.read())
+    err = np.linalg.norm(pos - w.grip_px())
+    assert err < 10, f"tracker drifted {err:.1f}px after 6 moves"
+
+
+if __name__ == "__main__":
+    for fn in [test_detect_objects_any_color, test_pad_and_hue_selection,
+               test_blink_locate, test_patch_tracker]:
+        fn()
+        print(f"ok {fn.__name__}")
+    print("ALL OK")
