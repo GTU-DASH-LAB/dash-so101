@@ -61,3 +61,50 @@ def babble(rig, scfg, rng):
         raise RuntimeError("babble: probes do not span joint space")
     Jt = np.linalg.solve(Q.T @ Q + 1e-9 * np.eye(3), Q.T @ S)
     return Jt.T, s
+
+
+def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px):
+    """Closed-loop image servo: drive the EE pixel onto target_px.
+
+    `locate(predicted_px) -> px | None` measures the EE after each move (blink
+    while the hand is free, patch tracker while carrying). J is Broyden-updated
+    every step; a no-improvement watchdog aborts instead of oscillating.
+    Returns (ok, J, s_ee).
+    """
+    target = np.asarray(target_px, float)
+    best = np.inf
+    stall = blind = 0
+    for _ in range(scfg.max_steps):
+        e = target - s_ee
+        err = np.linalg.norm(e)
+        if err <= tol_px and blind == 0:  # never declare success on prediction alone
+            return True, J, s_ee
+        if err < best - 1.0:
+            best, stall = err, 0
+        else:
+            stall += 1
+            if stall >= scfg.diverge_patience:
+                return False, J, s_ee  # caller re-anchors / re-babbles
+        dq = damped_pinv(J, scfg.damping) @ (scfg.lam * e)
+        dq = np.clip(dq, -scfg.dq_max, scfg.dq_max)
+        q_before = rig.get_q()
+        rig.set_q(q_before + dq)
+        dq_actual = rig.get_q() - q_before  # post-clamp truth
+        s_pred = s_ee + J @ dq_actual
+        s_new = locate(s_pred)
+        # measurement gate: a blink/track wildly off the motion model is an
+        # outlier (degenerate blink geometry, occlusion) — remeasure once,
+        # then trust the prediction for this step rather than corrupting J
+        if s_new is not None and np.linalg.norm(s_new - s_pred) > scfg.reject_px:
+            s_new = locate(s_pred)
+        if s_new is None or np.linalg.norm(s_new - s_pred) > scfg.reject_px:
+            blind += 1
+            if blind > scfg.max_blind:
+                return False, J, s_ee
+            s_ee = s_pred
+            continue
+        blind = 0
+        J = broyden_update(J, dq_actual, s_new - s_ee,
+                           scfg.broyden_beta, scfg.min_dq)
+        s_ee = s_new
+    return False, J, s_ee

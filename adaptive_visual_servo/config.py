@@ -61,10 +61,13 @@ class ServoConfig:
     lift_z: float = 0.09
     release_z: float = 0.055
     # perception
-    blink_dg: tuple = (1.0, 0.45)   # gripper open values toggled to blink
-    diff_thresh: int = 18
+    blink_dg: tuple = (1.0, 0.4)    # gripper open values toggled to blink
+                                    # (g_mid must stay above SimConfig.grip_close)
+    diff_thresh: int = 10           # blink slivers are blur-attenuated; noise floor ~4
     bg_thresh: int = 28
-    min_blob: int = 40
+    min_blob: int = 25
+    reject_px: float = 28.0         # measurement gate vs. J-predicted EE motion
+    max_blind: int = 2              # consecutive steps allowed on prediction only
     obj_min_area: int = 80
     pad_hue: int = 165              # OpenCV hue of the pink drop pad
     hue_tol: int = 14
