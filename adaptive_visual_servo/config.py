@@ -44,7 +44,7 @@ class SimConfig:
 class ServoConfig:
     # babbling
     babble_probes: int = 22
-    babble_step: tuple = (0.045, 0.05, 0.05)  # max |dq| per joint per probe
+    babble_step: float = 0.05  # max |dq| per joint per probe (any DOF count)
     # servo loop
     lam: float = 0.5           # fraction of error corrected per step
     dq_max: float = 0.06       # per-joint per-step clamp (rad; deg on real)
@@ -63,8 +63,12 @@ class ServoConfig:
     release_z: float = 0.055
     obj_max_area: int = 3500        # px^2; larger diff blobs are the arm, not objects
     # perception
-    blink_dg: tuple = (1.0, 0.4)    # gripper open values toggled to blink
+    blink_dg: tuple = (1.0, 0.75)   # gripper open values toggled to blink
                                     # (g_mid must stay above SimConfig.grip_close)
+                                    # smaller sweep measurably reduces blink
+                                    # centroid bias on the real URDF gripper
+                                    # mesh (pb_sim: ~39px -> ~28px mean, still
+                                    # a real bias -- see README calibration note)
     diff_thresh: int = 10           # blink slivers are blur-attenuated; noise floor ~4
     bg_thresh: int = 28
     min_blob: int = 25

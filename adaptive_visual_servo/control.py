@@ -36,14 +36,15 @@ def babble(rig, scfg, rng):
     pose; blink-localize the EE before/after each probe; least-squares fit of
     ds = J dq over all good pairs. Returns (J, s_ee)."""
     q0 = rig.get_q()
+    n = len(q0)
     s = blink_locate(rig, scfg)
     if s is None:
         raise RuntimeError("babble: EE blink not visible at start pose")
-    amp = np.array(scfg.babble_step)
+    amp = np.full(n, scfg.babble_step)
     q = q0.copy()
     dqs, dss = [], []
     for _ in range(scfg.babble_probes):
-        q_target = q0 + rng.uniform(-1.5, 1.5, 3) * amp  # leash: stay near q0
+        q_target = q0 + rng.uniform(-1.5, 1.5, n) * amp  # leash: stay near q0
         step = np.clip(q_target - q, -amp, amp)
         q_before = rig.get_q()
         rig.set_q(q + step)
@@ -55,12 +56,12 @@ def babble(rig, scfg, rng):
         dqs.append(dq)
         dss.append(s_new - s)
         s = s_new
-    if len(dqs) < 6:
+    if len(dqs) < 2 * n:
         raise RuntimeError(f"babble: only {len(dqs)} usable probes")
     Q, S = np.stack(dqs), np.stack(dss)
-    if np.linalg.matrix_rank(Q, tol=1e-4) < 3:
+    if np.linalg.matrix_rank(Q, tol=1e-4) < n:
         raise RuntimeError("babble: probes do not span joint space")
-    Jt = np.linalg.solve(Q.T @ Q + 1e-9 * np.eye(3), Q.T @ S)
+    Jt = np.linalg.solve(Q.T @ Q + 1e-9 * np.eye(n), Q.T @ S)
     return Jt.T, s
 
 
