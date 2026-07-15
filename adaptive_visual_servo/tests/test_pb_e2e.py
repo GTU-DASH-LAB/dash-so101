@@ -8,10 +8,10 @@ failing, one completed the full state machine but released off-target by
 ~30cm). The root cause is blink_locate's centroid bias on the real gripper
 mesh (measured ~3-6cm at working poses vs the toy sim's few-px bias -- see
 README's "Known limitations" section) propagating through approach, descend,
-and transport. GRASP_CAPTURE_RADIUS was widened (0.035->0.065m) to compensate
-for grasp specifically, which helped episodes get further, but transport's
-locate_by_diff tracking and the image-based target itself still carry that
-bias uncorrected.
+and transport. Grasping is contact-triggered (a jaw must actually touch the
+object while closing), so that localization bias translates directly into
+missed grasps; transport's locate_by_diff tracking and the image-based
+target itself carry the same bias uncorrected.
 
 What THIS test actually guards: the two real bugs fixed while building this
 backend --

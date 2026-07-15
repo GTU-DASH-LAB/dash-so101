@@ -59,7 +59,7 @@ def test_grasp_physics():
         w.set_q(q)
         assert np.hypot(*(w.ee_world()[:2] - xy)) < 0.02, "IK helper should reach the object"
         w.set_gripper(0.0)
-        assert w.gripper_contact(), "closing near the object should trigger a proximity grasp"
+        assert w.gripper_contact(), "closing on the object should weld on real jaw contact"
         # carried object follows the gripper through motion
         w.set_q(q + np.array([0.3, 0.1, -0.1, 0.0, 0.0]))
         new_xy = w.object_xy(o)
@@ -70,7 +70,7 @@ def test_grasp_physics():
         w.close()
 
 
-def test_grasp_requires_proximity():
+def test_grasp_requires_contact():
     w = PyBulletWorld(gui=False, seed=4)
     try:
         w.spawn_random(1)
@@ -82,7 +82,7 @@ def test_grasp_requires_proximity():
 
 if __name__ == "__main__":
     for fn in [test_render_and_spawn, test_kinematics_and_clamp,
-               test_grasp_physics, test_grasp_requires_proximity]:
+               test_grasp_physics, test_grasp_requires_contact]:
         fn()
         print(f"ok {fn.__name__}")
     print("ALL OK")

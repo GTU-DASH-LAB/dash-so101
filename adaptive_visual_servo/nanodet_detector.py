@@ -123,14 +123,20 @@ class NanodetDetector:
         (output,) = self.session.run(None, {"data": x})
         dets = decode_nanodet_output(output[0], score_thresh=self.score_thresh,
                                      nms_thresh=self.nms_thresh)
+        h, w = frame.shape[:2]
         blobs = []
         for x0, y0, x1, y1, score, cid in dets:
             if self.allowed is not None and cid not in self.allowed:
                 continue
             x0, y0, x1, y1 = x0 / scale, y0 / scale, x1 / scale, y1 / scale
             cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            # mean BGR of the box interior, so pick_by_hue ("pick the red one")
+            # works the same as with the bg-sub detector's blobs
+            ix0, iy0 = int(np.clip(x0, 0, w - 1)), int(np.clip(y0, 0, h - 1))
+            ix1, iy1 = int(np.clip(x1, ix0 + 1, w)), int(np.clip(y1, iy0 + 1, h))
+            color = tuple(frame[iy0:iy1, ix0:ix1].reshape(-1, 3).mean(axis=0))
             blobs.append(Blob(np.array([cx, cy]), int((x1 - x0) * (y1 - y0)),
                               (int(x0), int(y0), int(x1 - x0), int(y1 - y0)),
-                              (0, 0, 0)))
+                              color))
         blobs.sort(key=lambda b: -b.area)
         return blobs

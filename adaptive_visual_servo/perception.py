@@ -5,7 +5,7 @@ and a small template tracker for the carry phase.
 Everything works on plain BGR frames — same code for sim and real camera.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
@@ -105,6 +105,69 @@ def blink_locate(rig, scfg):
     weights = np.array([b.area for b in blobs], float)
     centers = np.stack([b.center for b in blobs])
     return (weights @ centers) / weights.sum()
+
+
+def _blink_pair(rig, scfg, pair):
+    return blink_locate(rig, replace(scfg, blink_dg=pair))
+
+
+def _perp(v):
+    return np.array([-v[1], v[0]])
+
+
+# safe blink pairs: gripper never goes below 0.4 (no grasp trigger, no chance
+# of striking an object under the jaws); the near-closure pair is FREE AIR ONLY
+BLINK_HI = (1.0, 0.8)      # jaw position ~ g=0.9
+BLINK_LO = (0.6, 0.4)      # jaw position ~ g=0.5
+BLINK_CLOSURE = (0.12, 0.0)
+
+
+def calibrate_grasp_frame(rig, scfg):
+    """One-time (per episode) self-calibration of where the jaws actually
+    close, for single-moving-jaw grippers like the SO-101.
+
+    The plain blink centroid tracks the MOVING jaw, which is offset from the
+    real grasp point (where the jaws meet) by up to the jaw gap -- measured
+    25-48px of aim error on the real URDF mesh. Fix: in free air, blink once
+    near closure (measuring the true grasp point directly), and express its
+    offset from the safe mid-range blink in the jaw-sweep direction frame
+    (component along the sweep d and along d-perpendicular). That 2-component
+    offset transfers across arm poses (rotation/scale ride along with d):
+    measured 2-10px residual at other poses vs ~25-48px uncorrected.
+
+    Call ONLY with the hand in free air (e.g. right after babbling). Returns
+    (a, b), or (0, 0) for symmetric grippers (both jaws move -> no offset),
+    or None if the blinks failed."""
+    c1 = _blink_pair(rig, scfg, BLINK_HI)
+    c2 = _blink_pair(rig, scfg, BLINK_LO)
+    if c1 is None or c2 is None:
+        rig.set_gripper(1.0)
+        return None
+    d = c2 - c1
+    if np.linalg.norm(d) < 3.0:
+        rig.set_gripper(1.0)
+        return (0.0, 0.0)  # symmetric gripper: blink centroid is already the grasp point
+    closure = _blink_pair(rig, scfg, BLINK_CLOSURE)
+    rig.set_gripper(1.0)  # blink restores its pair's first value; travel open
+    if closure is None:
+        return None
+    M = np.stack([d, _perp(d)], axis=1)
+    a, b = np.linalg.solve(M, closure - c2)
+    return (float(a), float(b))
+
+
+def locate_grasp_point(rig, scfg, ab):
+    """Grasp-point (jaw-closure) locator using only safe open-range blinks
+    plus the calibrated sweep-frame offset from calibrate_grasp_frame."""
+    c1 = _blink_pair(rig, scfg, BLINK_HI)
+    c2 = _blink_pair(rig, scfg, BLINK_LO)
+    rig.set_gripper(1.0)
+    if c1 is None or c2 is None:
+        return None
+    d = c2 - c1
+    if np.linalg.norm(d) < 3.0:
+        return c2
+    return c2 + ab[0] * d + ab[1] * _perp(d)
 
 
 def locate_by_diff(frame, background, center, roi=80, thresh=28, min_area=30, max_jump=25.0):

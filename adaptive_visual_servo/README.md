@@ -66,9 +66,9 @@ touches `SimWorld`'s true state.
   link-length model like `sim.py`'s `NominalModel`. Only used for the Z move; XY stays visually closed.
 - `nanodet_detector.py` — `NanodetDetector`, a real trained object detector (NanoDet-Plus, ONNX
   inference only — no PyTorch training deps) plugged in through `run_episode`'s `detector` argument.
-  Best on real-camera footage of everyday objects (its COCO classes: ball, bottle, cup, fruit, ...) —
-  the sim's abstract painted shapes don't resemble any COCO class, so background subtraction stays
-  the sim's default detector.
+  **The default detector in `run_real.py`** (real cameras see real COCO objects: ball, bottle, cup,
+  fruit, ...); its blobs carry mean-color too, so `--hue` selection works with it. The sim's abstract
+  painted shapes don't resemble any COCO class, so background subtraction stays the sim's default.
 - `perception.py` — blobs, background-subtraction detector, HSV selector, blink locator, bg-diff carry-phase locator.
 - `control.py` — babbling, Broyden servo, interleaved descend, episode state machine. Robot-agnostic
   and dimension-agnostic: works with any `set_q/get_q/set_gripper/gripper_contact/read` rig, any DOF count.
@@ -96,24 +96,39 @@ for t in adaptive_visual_servo/tests/test_*.py; do python "$t"; done
 ## Known limitations
 
 `run_pb_sim.py` / `pb_sim.py` is **not yet at the toy sim's reliability** (which is 100% on its
-own randomized batch). Root cause: `blink_locate`'s diff-centroid has a much larger bias against
-the true gripper point on the real URDF's gripper mesh (~3-6cm at working poses, measured directly)
-than on the toy sim's simple line rendering (a few px). That bias propagates through approach,
-descend, and transport. Mitigations applied so far: a smaller blink sweep amplitude, looser servo
-tolerances matched to the measured noise floor, and a wider grasp capture radius — these get
-episodes further (through descend, sometimes full completion) but don't close the gap; a 3-seed
-batch during development delivered 0/3 to the pad. `tests/test_pb_e2e.py` is scoped to what's
-actually solid: every episode returns a well-formed result without crashing or hanging, within a
-bounded step/retry budget (two real bugs found and fixed getting here — an unbounded descend loop
-that spun for 29+ minutes when placo's IK stalled at some poses, and an uncaught exception crashing
-the episode when babble-based recovery failed). Closing the delivery-accuracy gap is real follow-up
-work (a different EE-localization scheme for the real mesh, most likely), not something faked here.
+own randomized batch). Grasping is **contact-triggered** (a jaw must physically touch the object
+during the closing sweep; no proximity shortcut), so every cm of perception error directly costs
+grasps. Two real adaptive-control defects were found and fixed by tracing failures on this backend:
+
+- **Single-moving-jaw aim bias**: the SO-101 has one moving jaw, so the blink diff tracks the *jaw*,
+  not the grasp point where the jaws meet — a systematic 25-48px aim error the Jacobian can't fix
+  because it's inside the measurement. Fixed by `perception.calibrate_grasp_frame`: once per
+  episode, in free air, a near-closed blink measures the true closure point directly and stores its
+  offset in the jaw-sweep direction frame; `locate_grasp_point` then reconstructs it from safe
+  open-range blinks (measured 2-10px residual across poses, vs 25-48px uncorrected). The toy sim's
+  symmetric gripper degrades gracefully to a zero offset.
+- **z-hold runaway near full extension**: the per-step height-hold correction was uncapped while the
+  visual servo is clamped at `dq_max` — near the arm's reach limit the IK returns huge joint deltas
+  for small height errors, and the hold was observed dragging a nearly-converged EE monotonically
+  off-target for 10+ steps. Fixed by clamping the hold term to the servo's own authority.
+
+These moved failures downstream (approach servo used to fail outright; episodes now regularly reach
+grasp attempts) but a 3-seed dev batch still delivered 0/3: the remaining gap is last-centimeter
+grasp mechanics — fine-servo tolerance (12px ≈ 1cm) plus calibration residual is marginal against
+~1cm objects, and a striking jaw can knock the object away (mitigated with heavier/damped objects
+and faster weld latching, not eliminated). `tests/test_pb_e2e.py` is scoped to what's actually
+solid: every episode returns a well-formed result without crashing or hanging, within a bounded
+step/retry budget (also guards two earlier bugs: an unbounded descend loop that spun 29+ minutes
+when placo's IK stalled, and an uncaught exception crashing episodes when babble recovery failed).
+Closing the delivery gap is real follow-up work, not something faked here.
 
 ## Real hardware (later)
 
 ```bash
 python adaptive_visual_servo/run_real.py --calibrate-gripper   # find real gripper values first
 python adaptive_visual_servo/run_real.py --port /dev/ttyACM0 --camera 0 --episodes 5
+python adaptive_visual_servo/run_real.py --classes "sports ball,cup"   # narrow nanodet's classes
+python adaptive_visual_servo/run_real.py --detector bgsub              # any-object fallback
 ```
 
 Read `run_real.py`'s module docstring first: per-step clamp (`RealConfig.max_step_deg`),

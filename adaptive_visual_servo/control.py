@@ -11,7 +11,8 @@ Robot interface (duck-typed; SimWorld and the real adapter both provide it):
 
 import numpy as np
 
-from perception import (blink_locate, detect_objects, detect_pad, locate_by_diff,
+from perception import (blink_locate, calibrate_grasp_frame, detect_objects,
+                        detect_pad, locate_by_diff, locate_grasp_point,
                         pick_by_hue)
 
 
@@ -188,16 +189,33 @@ def run_episode(rig, model, scfg, background, rng,
     except RuntimeError as e:
         return fail(f"babble failed: {e}")
 
+    # self-calibrate the jaw-closure point (single-moving-jaw grippers aim
+    # 25-48px off if the servo tracks the raw blink centroid = the moving jaw;
+    # see perception.calibrate_grasp_frame). Free air here: hand is at the
+    # babble/travel pose, not near objects. Falls back to the raw blink if
+    # calibration fails (symmetric grippers return (0,0) and behave as before).
+    grasp_ab = calibrate_grasp_frame(rig, scfg)
+
     def bl(pred):
+        if grasp_ab is not None:
+            return locate_grasp_point(rig, scfg, grasp_ab)
         return blink_locate(rig, scfg)
+
+    s2 = bl(None)  # re-anchor: babble measured the raw blink point, not this one
+    if s2 is not None:
+        s = s2
 
     def z_hold(z_ref):
         """Per-step correction keeping nominal height at z_ref while the
-        image loop owns XY (see servo_to.shape_dq)."""
+        image loop owns XY (see servo_to.shape_dq). Clamped to the servo's
+        own per-joint authority (dq_max): near full arm extension the IK
+        returns huge joint deltas for small dz, and an uncapped hold term
+        was observed dragging the EE monotonically AWAY from a nearly
+        converged target for 10+ steps (servo clamped at dq_max, hold not)."""
         def f(q):
             dz = float(np.clip(0.6 * (z_ref - model.ee(q)[2]),
                                -scfg.approach_dz, scfg.approach_dz))
-            return model.step_dz(q, dz)
+            return np.clip(model.step_dz(q, dz), -scfg.dq_max, scfg.dq_max)
         return f
 
     def servo_recover(target, tol, hold):
@@ -206,16 +224,19 @@ def run_episode(rig, model, scfg, background, rng,
         ok, J, s = servo_to(rig, scfg, J, s, target, bl, tol, shape_dq=hold)
         if ok:
             return True
-        s2 = blink_locate(rig, scfg)
+        s2 = bl(None)
         if s2 is not None:
             s = s2
         ok, J, s = servo_to(rig, scfg, J, s, target, bl, tol, shape_dq=hold)
         if ok:
             return True
         try:
-            J, s = babble(rig, scfg, rng)
+            J, _ = babble(rig, scfg, rng)
         except RuntimeError:
             return False  # e.g. EE not visible right now -- recovery failed, not a crash
+        s2 = bl(None)  # babble tracks the raw blink point; re-anchor to ours
+        if s2 is not None:
+            s = s2
         ok, J, s = servo_to(rig, scfg, J, s, target, bl, tol, shape_dq=hold)
         return ok
 
@@ -223,7 +244,7 @@ def run_episode(rig, model, scfg, background, rng,
     grasped = False
     for attempt in range(scfg.retries + 1):
         nominal_z_to(rig, model, scfg.approach_z, scfg)
-        s_up = blink_locate(rig, scfg)
+        s_up = bl(None)
         if s_up is not None:
             s = s_up
         if not servo_recover(obj_px, scfg.tol_coarse_px, z_hold(scfg.approach_z)):
@@ -240,7 +261,7 @@ def run_episode(rig, model, scfg, background, rng,
                 break
             stage = max(scfg.grasp_z, z - scfg.approach_dz)
             nominal_z_to(rig, model, stage, scfg)
-            s2 = blink_locate(rig, scfg)
+            s2 = bl(None)
             if s2 is not None:
                 s = s2
             if not servo_recover(obj_px, scfg.tol_fine_px, z_hold(stage)):

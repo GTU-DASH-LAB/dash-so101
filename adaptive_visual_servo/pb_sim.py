@@ -8,13 +8,10 @@ of test episodes), this one drives all 5 arm joints through the actual URDF
 kinematic chain via pybullet, with a real rendered camera, and --gui shows a
 live 3D window so you can watch the arm work.
 
-Grasping: the same proximity-triggered `p.createConstraint` weld as sim.py's
-distance-radius heuristic (not real mesh contact/friction) -- general
-position-only IK picks an arbitrary wrist orientation, so real contact
-detection was unreliable even when ee_world() sat right on top of the object.
-# ponytail: proximity weld, not contact/friction-grasp physics -- upgrade to
-# orientation-aware IK + real contact if objects need to slip/rotate
-# realistically in-hand.
+Grasping: contact-triggered `p.createConstraint` weld -- the object attaches
+only when a jaw is actually touching it while the gripper closes, checked
+during the closing sweep (not just after it). Friction-only grasping (no
+weld at all) is the remaining realism upgrade if in-hand slip matters.
 """
 
 import os
@@ -40,13 +37,6 @@ BASE_Z = 0.0           # robot base sits on the table plane
 PAD_CENTER = (0.20, 0.20)
 PAD_RADIUS = 0.045
 TABLE_RGBA = (0.80, 0.80, 0.79, 1.0)
-GRASP_CAPTURE_RADIUS = 0.065   # horizontal ee_world()-to-object distance for a grab.
-                               # Wider than sim.py's 0.018: blink_locate's centroid
-                               # bias on the real gripper mesh (measured ~3-6cm at
-                               # working poses, see README) means the servo lands
-                               # near, not exactly on, the object -- capture radius
-                               # sized to that measured floor, not a random guess.
-GRASP_Z_TOL = 0.06              # height tolerance, generous: descend targeting is Task 9
 
 
 class PyBulletWorld:
@@ -110,8 +100,11 @@ class PyBulletWorld:
         else:
             col = p.createCollisionShape(p.GEOM_BOX, halfExtents=[r, r, h / 2])
             vis = p.createVisualShape(p.GEOM_BOX, halfExtents=[r, r, h / 2], rgbaColor=color)
-        body = p.createMultiBody(0.01, col, vis, [xy[0], xy[1], h / 2 + 0.002])
-        p.changeDynamics(body, -1, lateralFriction=1.0)
+        # 50g with damping and no bounce: a 10g undamped object got flung 25m
+        # by a glancing jaw strike before the contact-weld could latch
+        body = p.createMultiBody(0.05, col, vis, [xy[0], xy[1], h / 2 + 0.002])
+        p.changeDynamics(body, -1, lateralFriction=1.0, restitution=0.0,
+                         linearDamping=0.6, angularDamping=0.6)
         obj = dict(body=body, r=r, attached=False, constraint=None)
         self.objects.append(obj)
         return obj
@@ -120,7 +113,9 @@ class PyBulletWorld:
         made = []
         for _ in range(n):
             for _try in range(200):
-                reach = self.rng.uniform(0.18, 0.32)
+                # keep objects at <= ~77% of max reach: near full extension the
+                # z-hold IK goes near-singular and destabilizes the servo
+                reach = self.rng.uniform(0.17, 0.27)
                 ang = self.rng.uniform(-0.5, 0.5)
                 x, y = reach * np.cos(ang), reach * np.sin(ang)
                 if np.hypot(x - PAD_CENTER[0], y - PAD_CENTER[1]) < PAD_RADIUS + 0.04:
@@ -156,10 +151,7 @@ class PyBulletWorld:
             p.setJointMotorControl2(self.robot, self._joint_idx[j], p.POSITION_CONTROL,
                                     targetPosition=float(v), force=15, maxVelocity=3.0)
         self._settle(24)
-        self._q_cmd = self.get_q()
-        for o in self.objects:
-            if o["attached"]:
-                pass  # constraint keeps it welded; physics moves it automatically
+        self._q_cmd = self.get_q()  # attached objects follow via their weld constraint
 
     def set_gripper(self, g):
         self.g = float(np.clip(g, 0.0, 1.0))
@@ -169,38 +161,41 @@ class PyBulletWorld:
         p.setJointMotorControl2(self.robot, self._joint_idx[GRIPPER_JOINT],
                                 p.POSITION_CONTROL, targetPosition=target,
                                 force=15, maxVelocity=8.0)
-        self._settle(60)  # full open<->close sweep is ~1.9rad, needs real settle time
-        if self.g < 0.35:
-            self._try_grasp()
-        elif self.g > 0.85:
+        closing = self.g < 0.35
+        # settle in small chunks, checking for jaw-object contact DURING the
+        # close -- the weld must latch at first touch, before the sweeping jaw
+        # builds momentum into the object or pushes it out of the hand
+        for _ in range(30):
+            self._settle(2)
+            if closing and not self.gripper_contact():
+                self._try_grasp()
+        if self.g > 0.85:
             self._release_all()
 
     def _try_grasp(self):
-        # proximity-triggered weld, not mesh contact: general position-only IK
-        # (used by callers/tests to reach a target) picks an arbitrary wrist
-        # orientation, so the jaws often don't face the object even when
-        # ee_world() is right on top of it -- same proven approach as
-        # sim.py's SimWorld (distance + height gate), just measured against
-        # the real URDF's gripper_frame_link.
-        # ponytail: proximity weld, not friction-grasp physics -- upgrade to
-        # real contact + orientation-aware IK if objects need to slip/rotate
-        # realistically in-hand.
-        ee = self.ee_world()
+        # contact-triggered weld: the object attaches only when a jaw is
+        # ACTUALLY touching it while the gripper is closing -- no proximity
+        # shortcut (an earlier proximity version stuck the cube to the hand
+        # from 6.5cm away, which looked absurd in the GUI). pybullet reports
+        # finger contacts on gripper_link (fixed jaw side) as well as the
+        # moving jaw's own link, so accept either.
+        # ponytail: weld-on-contact, not friction-grasp physics -- upgrade if
+        # objects need to slip/rotate realistically in-hand.
         for o in self.objects:
             if o["attached"]:
                 continue
+            pts = p.getContactPoints(bodyA=self.robot, bodyB=o["body"])
+            if not any(pt[3] in (self.gripper_link, self.jaw_link) for pt in pts):
+                continue
             pos, orn = p.getBasePositionAndOrientation(o["body"])
-            close_xy = np.hypot(pos[0] - ee[0], pos[1] - ee[1]) < GRASP_CAPTURE_RADIUS
-            close_z = abs(pos[2] - ee[2]) < GRASP_Z_TOL
-            if close_xy and close_z:
-                link_state = p.getLinkState(self.robot, self.gripper_link)
-                inv_pos, inv_orn = p.invertTransform(link_state[4], link_state[5])
-                rel_pos, rel_orn = p.multiplyTransforms(inv_pos, inv_orn, pos, orn)
-                cid = p.createConstraint(self.robot, self.gripper_link, o["body"], -1,
-                                         p.JOINT_FIXED, [0, 0, 0], rel_pos, [0, 0, 0],
-                                         childFrameOrientation=rel_orn)
-                p.changeConstraint(cid, maxForce=200)
-                o["attached"], o["constraint"] = True, cid
+            link_state = p.getLinkState(self.robot, self.gripper_link)
+            inv_pos, inv_orn = p.invertTransform(link_state[4], link_state[5])
+            rel_pos, rel_orn = p.multiplyTransforms(inv_pos, inv_orn, pos, orn)
+            cid = p.createConstraint(self.robot, self.gripper_link, o["body"], -1,
+                                     p.JOINT_FIXED, [0, 0, 0], rel_pos, [0, 0, 0],
+                                     childFrameOrientation=rel_orn)
+            p.changeConstraint(cid, maxForce=200)
+            o["attached"], o["constraint"] = True, cid
 
     def _release_all(self):
         for o in self.objects:

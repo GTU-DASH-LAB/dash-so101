@@ -8,6 +8,11 @@ unchanged from sim to real -- only this file talks to lerobot. Drives all 6
 motors: 5 arm joints (shoulder_pan/lift, elbow_flex, wrist_flex, wrist_roll)
 directly through the visual servo's Jacobian, gripper separately.
 
+Object detection defaults to NanoDet-Plus (nanodet_detector.py) -- a real
+trained COCO detector suits the real camera and everyday objects (ball,
+bottle, cup, fruit...). `--detector bgsub` falls back to background
+subtraction for arbitrary non-COCO objects; `--classes` tunes the allowlist.
+
 *** UNTESTED against real hardware. *** First run checklist:
   - Arm powered, workspace clear, YOUR hand near the power switch.
   - Camera fixed overhead/eye-to-hand, matching the sim's assumption.
@@ -33,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import RealConfig, ServoConfig
 from control import run_episode
 from lerobot_ik import PlacoModel
+from nanodet_detector import TABLETOP_CLASSES, NanodetDetector
 
 
 class SO101Rig:
@@ -121,6 +127,13 @@ def main():
                     help="only pick the object with this OpenCV hue (0-179)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--calibrate-gripper", action="store_true")
+    ap.add_argument("--detector", choices=["nanodet", "bgsub"], default="nanodet",
+                    help="nanodet (default): real trained COCO detector, best for "
+                         "everyday objects on the real camera. bgsub: background "
+                         "subtraction, any object but needs a clean background photo")
+    ap.add_argument("--classes", default=None,
+                    help="comma-separated COCO class allowlist for nanodet "
+                         f"(default: {','.join(TABLETOP_CLASSES)}; 'all' = all 80)")
     args = ap.parse_args()
 
     cfg.port, cfg.camera_index, cfg.robot_id = args.port, args.camera, args.id
@@ -136,6 +149,14 @@ def main():
         # can watch the real camera's actual blink noise on hardware.
         scfg = ServoConfig(tol_coarse_px=18.0, tol_fine_px=12.0, reject_px=45.0)
         rng = np.random.default_rng(args.seed)
+        detector = None
+        if args.detector == "nanodet":
+            classes = (None if args.classes == "all" else
+                       tuple(args.classes.split(",")) if args.classes else
+                       TABLETOP_CLASSES)
+            detector = NanodetDetector(class_names=classes)
+        # background photo still needed even with nanodet: locate_by_diff
+        # (carry-phase tracking) diffs against it regardless of the detector
         input("Workspace clear of objects for the background photo -- "
               "press ENTER when ready...")
         background = rig.capture_background()
@@ -143,7 +164,7 @@ def main():
         for ep in range(args.episodes):
             print(f"episode {ep + 1}/{args.episodes}")
             res = run_episode(rig, model, scfg, background, rng,
-                              target_hue=args.hue, J=J)
+                              target_hue=args.hue, detector=detector, J=J)
             J = res["J"]
             print(f"  {res['reason']!r}")
             if res["reason"] in ("no objects detected", "drop pad not found"):
