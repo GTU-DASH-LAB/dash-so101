@@ -178,12 +178,15 @@ def run_episode(rig, model, scfg, background, rng,
         return fail("no object matches requested hue")
     obj_px = np.asarray(tgt.center)
 
-    if J is None:
-        J, s = babble(rig, scfg, rng)
-    else:
-        s = blink_locate(rig, scfg)
-        if s is None:
+    try:
+        if J is None:
             J, s = babble(rig, scfg, rng)
+        else:
+            s = blink_locate(rig, scfg)
+            if s is None:
+                J, s = babble(rig, scfg, rng)
+    except RuntimeError as e:
+        return fail(f"babble failed: {e}")
 
     def bl(pred):
         return blink_locate(rig, scfg)
@@ -209,7 +212,10 @@ def run_episode(rig, model, scfg, background, rng,
         ok, J, s = servo_to(rig, scfg, J, s, target, bl, tol, shape_dq=hold)
         if ok:
             return True
-        J, s = babble(rig, scfg, rng)
+        try:
+            J, s = babble(rig, scfg, rng)
+        except RuntimeError:
+            return False  # e.g. EE not visible right now -- recovery failed, not a crash
         ok, J, s = servo_to(rig, scfg, J, s, target, bl, tol, shape_dq=hold)
         return ok
 
@@ -222,9 +228,13 @@ def run_episode(rig, model, scfg, background, rng,
             s = s_up
         if not servo_recover(obj_px, scfg.tol_coarse_px, z_hold(scfg.approach_z)):
             return fail("approach servo failed")
-        # interleaved descend: parallax shrinks as height drops
+        # interleaved descend: parallax shrinks as height drops. Capped, not
+        # `while True` -- a real IK backend (unlike the toy sim's always-
+        # solvable 3-DOF analytic model) can plateau at some pose and make no
+        # further Z progress, which an unbounded loop would spin on forever.
         ok_descend = True
-        while True:
+        max_stages = 3 * int(np.ceil((scfg.approach_z - scfg.grasp_z) / scfg.approach_dz)) + 5
+        for _ in range(max_stages):
             z = model.ee(rig.get_q())[2]
             if z <= scfg.grasp_z + 0.004:
                 break
@@ -236,6 +246,8 @@ def run_episode(rig, model, scfg, background, rng,
             if not servo_recover(obj_px, scfg.tol_fine_px, z_hold(stage)):
                 ok_descend = False
                 break
+        else:
+            ok_descend = False  # never reached grasp_z within the stage budget
         if ok_descend:
             rig.set_gripper(0.0)
             if rig.gripper_contact():

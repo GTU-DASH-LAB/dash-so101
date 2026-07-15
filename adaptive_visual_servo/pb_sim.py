@@ -40,7 +40,12 @@ BASE_Z = 0.0           # robot base sits on the table plane
 PAD_CENTER = (0.20, 0.20)
 PAD_RADIUS = 0.045
 TABLE_RGBA = (0.80, 0.80, 0.79, 1.0)
-GRASP_CAPTURE_RADIUS = 0.035   # horizontal ee_world()-to-object distance for a grab
+GRASP_CAPTURE_RADIUS = 0.065   # horizontal ee_world()-to-object distance for a grab.
+                               # Wider than sim.py's 0.018: blink_locate's centroid
+                               # bias on the real gripper mesh (measured ~3-6cm at
+                               # working poses, see README) means the servo lands
+                               # near, not exactly on, the object -- capture radius
+                               # sized to that measured floor, not a random guess.
 GRASP_Z_TOL = 0.06              # height tolerance, generous: descend targeting is Task 9
 
 

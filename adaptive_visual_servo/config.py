@@ -84,29 +84,24 @@ class ServoConfig:
 
 @dataclass
 class RealConfig:
-    """SO-101 hardware mode. UNTESTED until first run on the arm."""
+    """SO-101 hardware mode. UNTESTED until first run on the arm.
+
+    All 6 motors are driven directly now (5 arm joints via the visual
+    servo's Jacobian + lerobot's placo IK for descend, gripper separately) --
+    earlier this slaved wrist_flex to a formula and fixed wrist_roll, driving
+    only 3 joints. Must match lerobot_ik.ARM_JOINTS's order (not imported
+    directly to avoid config.py depending on a module that imports lerobot).
+    """
     port: str = "/dev/ttyACM0"
     robot_id: str = "avs_follower"
     camera_index: int = 0
-    # our 3 controlled joints -> SO-101 motor names
-    joints: tuple = ("shoulder_pan", "shoulder_lift", "elbow_flex")
-    # wrist_flex is slaved to keep the gripper pointing down:
-    # wrist_flex = wrist_k * (shoulder_lift + elbow_flex) + wrist_offset  (degrees)
-    wrist_k: float = -1.0
-    wrist_offset: float = 0.0
-    wrist_roll: float = 0.0
+    joints: tuple = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
     max_step_deg: float = 4.0       # per-command clamp, same spirit as max_relative_target=5
     settle_s: float = 0.35
     gripper_open_pos: float = 50.0  # gripper joint value at g=1.0 (calibrate!)
     gripper_closed_pos: float = 5.0
     load_threshold: int = 300       # |Present_Load| indicating contact (calibrate!)
-    # soft joint limits (deg) enforced on top of firmware limits
-    q_min_deg: tuple = (-90.0, 5.0, -135.0)
-    q_max_deg: tuple = (90.0, 85.0, -10.0)
-    # nominal link lengths (m) for the open-loop Z descend ONLY -- XY stays
-    # visually closed, so like the sim's model_error these are allowed to be
-    # wrong. Defaults are the same SO-101-ish guess sim.py's SimConfig uses;
-    # measure your actual arm and override here if descend steps feel off.
-    link_base: float = 0.05
-    link1: float = 0.11
-    link2: float = 0.14
+    # soft joint limits (deg), straight from the real URDF's own <limit> tags
+    # (assets/SO101/so101_new_calib.urdf) -- authoritative, not guessed.
+    q_min_deg: tuple = (-110.0, -100.0, -96.83, -95.0, -157.21)
+    q_max_deg: tuple = (110.0, 100.0, 96.83, 95.0, 162.79)

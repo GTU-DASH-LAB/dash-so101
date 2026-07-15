@@ -32,10 +32,22 @@ class PlacoModel:
 
     def step_dz(self, q, dz):
         """Joint delta moving the EE by (0,0,dz), via lerobot's placo IK
-        solver, position-only (orientation unconstrained)."""
+        solver, softly biased to hold the current wrist orientation.
+
+        orientation_weight=0.0 (position-only) looked right but let the wrist
+        drift steadily across repeated calls. orientation_weight=1.0 (equal to
+        position) looked like the fix but is a 6-constraint target (3 position
+        + 3 orientation) for a 5-DOF arm -- generally infeasible exactly, and
+        the solver can get stuck trading the two off against each other,
+        making zero Z progress at some poses (observed: run_episode's descend
+        loop, which has no iteration cap, ran for 29+ minutes on this before
+        being killed). orientation_weight << position_weight keeps it a soft
+        tie-breaker in the null space (fixes the drift) without turning
+        descent into an infeasible/stalling exact-pose IK problem.
+        """
         q_deg = np.degrees(q)
         T_target = self.kin.forward_kinematics(q_deg)
         T_target[2, 3] += dz
         q_deg_new = self.kin.inverse_kinematics(q_deg, T_target,
-                                                position_weight=1.0, orientation_weight=0.0)
+                                                position_weight=1.0, orientation_weight=0.05)
         return np.radians(q_deg_new) - q

@@ -1,10 +1,12 @@
 """Real SO-101 hardware runner for adaptive_visual_servo.
 
 Wraps lerobot's SOFollower (SO-100/101 driver) + an OpenCV camera behind the
-same duck-typed rig interface control.py already exercises against SimWorld:
-get_q/set_q/set_gripper/gripper_contact/read (all in radians / [0,1] / BGR
-frames). control.py and perception.py are otherwise unchanged from sim to
-real -- only this file talks to lerobot.
+same duck-typed rig interface control.py already exercises against SimWorld
+and pb_sim.PyBulletWorld: get_q/set_q/set_gripper/gripper_contact/read (all
+in radians / [0,1] / BGR frames). control.py and perception.py are otherwise
+unchanged from sim to real -- only this file talks to lerobot. Drives all 6
+motors: 5 arm joints (shoulder_pan/lift, elbow_flex, wrist_flex, wrist_roll)
+directly through the visual servo's Jacobian, gripper separately.
 
 *** UNTESTED against real hardware. *** First run checklist:
   - Arm powered, workspace clear, YOUR hand near the power switch.
@@ -15,9 +17,9 @@ real -- only this file talks to lerobot.
   - `--calibrate-gripper` FIRST: config.py's gripper_open_pos/closed_pos and
     load_threshold are placeholders. Run it, watch the printed load values,
     and set real numbers in config.py before trusting grasp detection.
-  - config.py's link_base/link1/link2 (RealConfig) are a rough SO-101 guess
-    used only for the open-loop Z descend -- measure your arm if descend
-    increments look wrong; XY is visually closed regardless.
+  - Z-descend uses lerobot_ik.PlacoModel against the real downloaded URDF
+    (assets/SO101/so101_new_calib.urdf) -- no per-arm length calibration
+    needed there; XY stays visually closed regardless of any residual error.
 """
 
 import argparse
@@ -30,7 +32,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import RealConfig, ServoConfig
 from control import run_episode
-from sim import NominalModel
+from lerobot_ik import PlacoModel
 
 
 class SO101Rig:
@@ -68,10 +70,7 @@ class SO101Rig:
         deg_before = np.degrees(self.get_q())
         step = np.clip(np.degrees(q) - deg_before, -c.max_step_deg, c.max_step_deg)
         deg = deg_before + step
-        wrist = c.wrist_k * (deg[1] + deg[2]) + c.wrist_offset
         action = {f"{j}.pos": float(v) for j, v in zip(c.joints, deg)}
-        action["wrist_flex.pos"] = float(wrist)
-        action["wrist_roll.pos"] = float(c.wrist_roll)
         self.robot.send_action(action)
         time.sleep(c.settle_s)
 
@@ -130,8 +129,12 @@ def main():
         if args.calibrate_gripper:
             calibrate_gripper(rig)
             return
-        model = NominalModel.from_lengths(cfg.link_base, cfg.link1, cfg.link2)
-        scfg = ServoConfig()
+        model = PlacoModel()
+        # pb_sim testing (same URDF gripper mesh) found the toy sim's tight
+        # tol_coarse_px=7/tol_fine_px=4 just chatters forever on real-mesh
+        # blink_locate noise -- start looser here too, tune further once you
+        # can watch the real camera's actual blink noise on hardware.
+        scfg = ServoConfig(tol_coarse_px=18.0, tol_fine_px=12.0, reject_px=45.0)
         rng = np.random.default_rng(args.seed)
         input("Workspace clear of objects for the background photo -- "
               "press ENTER when ready...")
