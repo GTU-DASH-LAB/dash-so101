@@ -67,8 +67,12 @@ touches `SimWorld`'s true state.
 - `nanodet_detector.py` — `NanodetDetector`, a real trained object detector (NanoDet-Plus, ONNX
   inference only — no PyTorch training deps) plugged in through `run_episode`'s `detector` argument.
   **The default detector in `run_real.py`** (real cameras see real COCO objects: ball, bottle, cup,
-  fruit, ...); its blobs carry mean-color too, so `--hue` selection works with it. The sim's abstract
-  painted shapes don't resemble any COCO class, so background subtraction stays the sim's default.
+  fruit, ...); its blobs carry mean-color too, so `--hue` selection works with it. Learned detections
+  are always cross-checked against background subtraction (`perception.filter_by_background`): a
+  pickable object must also differ from the empty-workspace photo — this drops detections of the
+  robot arm itself, which otherwise becomes the "largest object" and the servo chases its own arm
+  (observed live). The sim's abstract painted shapes don't resemble any COCO class, so background
+  subtraction stays the sim's default.
 - `perception.py` — blobs, background-subtraction detector, HSV selector, blink locator, bg-diff carry-phase locator.
 - `control.py` — babbling, Broyden servo, interleaved descend, episode state machine. Robot-agnostic
   and dimension-agnostic: works with any `set_q/get_q/set_gripper/gripper_contact/read` rig, any DOF count.

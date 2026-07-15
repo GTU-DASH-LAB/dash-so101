@@ -12,8 +12,8 @@ Robot interface (duck-typed; SimWorld and the real adapter both provide it):
 import numpy as np
 
 from perception import (blink_locate, calibrate_grasp_frame, detect_objects,
-                        detect_pad, locate_by_diff, locate_grasp_point,
-                        pick_by_hue)
+                        detect_pad, filter_by_background, locate_by_diff,
+                        locate_grasp_point, pick_by_hue)
 
 
 def damped_pinv(J, damping=1e-2):
@@ -183,9 +183,18 @@ def run_episode(rig, model, scfg, background, rng,
         return fail("drop pad not found")
 
     def find_objects(fr, extra_exclude=()):
-        blobs = (detector(fr) if detector is not None else
-                 detect_objects(fr, background, scfg.bg_thresh, scfg.obj_min_area,
-                                max_area=scfg.obj_max_area))
+        if detector is not None:
+            # cross-check learned detections against background subtraction:
+            # a pickable object must also differ from the empty-workspace
+            # photo. This drops detections of the ROBOT ARM itself (parked at
+            # home in that photo, so bg-sub never sees it) -- observed live:
+            # nanodet boxed the whole arm as its largest detection and the
+            # servo chased its own arm instead of the cube.
+            blobs = filter_by_background(detector(fr), fr, background,
+                                         scfg.bg_thresh, scfg.obj_min_area)
+        else:
+            blobs = detect_objects(fr, background, scfg.bg_thresh, scfg.obj_min_area,
+                                   max_area=scfg.obj_max_area)
         excl = [pad_px, *extra_exclude]
         return [b for b in blobs
                 if all(np.linalg.norm(b.center - np.asarray(p)) > 60 for p in excl)]

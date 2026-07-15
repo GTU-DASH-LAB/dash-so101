@@ -64,6 +64,9 @@ class ControllerView:
         if self._last is None:
             return
         img = self._last.copy()
+        for b in self._ann.get("raw_dets", []):  # detector output pre-filtering
+            x, y, w, h = b.bbox
+            cv2.rectangle(img, (x, y), (x + w, y + h), (140, 140, 140), 1)
         for b in self._ann.get("blobs", []):
             x, y, w, h = b.bbox
             cv2.rectangle(img, (x, y), (x + w, y + h), (0, 200, 0), 2)
@@ -78,7 +81,7 @@ class ControllerView:
         if s is not None:
             u, v = np.int32(s)
             cv2.drawMarker(img, (u, v), (0, 220, 255), cv2.MARKER_CROSS, 16, 2)
-        cv2.putText(img, "green=detections red=target magenta=pad yellow=EE",
+        cv2.putText(img, "gray=raw detector green=accepted red=target magenta=pad yellow=EE",
                     (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (30, 30, 30), 1)
         cv2.imshow("controller view", img)
         cv2.waitKey(1)
@@ -111,6 +114,12 @@ def main():
         print(f"episode {ep + 1}/{args.episodes} (seed {seed})")
         w = PyBulletWorld(gui=args.gui, seed=seed)
         rig = ControllerView(w) if args.gui else w
+        ep_detector = detector
+        if detector is not None and args.gui:
+            def ep_detector(frame, _rig=rig):  # show raw boxes pre-filtering
+                dets = detector(frame)
+                _rig.debug(dict(raw_dets=dets))
+                return dets
         try:
             bg = rig.capture_background()
             objs = w.spawn_random(args.objects)
@@ -118,7 +127,7 @@ def main():
             J = None
             for i, o in enumerate(objs):
                 res = run_episode(rig, model, PB_SCFG, bg, rng, target_hue=args.hue,
-                                  detector=detector, J=J,
+                                  detector=ep_detector, J=J,
                                   debug=rig.debug if args.gui else None)
                 J = res["J"]
                 dist = np.hypot(*(w.object_xy(o) - np.array(PAD_CENTER)))

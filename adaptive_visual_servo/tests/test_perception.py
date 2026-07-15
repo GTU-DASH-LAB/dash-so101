@@ -93,10 +93,33 @@ def test_locate_by_diff_rejects_distant_distractor():
                           SCFG.obj_min_area, SCFG.track_max_jump) is None
 
 
+def test_filter_by_background_drops_arm_detection():
+    """A learned detector will happily box the robot arm itself (seen live
+    with nanodet in the pybullet GUI: its biggest detection was the arm, and
+    the servo chased its own arm). Detections must be corroborated by the
+    bg-diff, where an arm parked at its background-photo pose can't appear."""
+    from perception import Blob, filter_by_background
+    w = SimWorld(seed=18)
+    bg = w.capture_background()  # arm at home is part of the background
+    (o,) = w.spawn_random(1)
+    frame = w.read()
+    obj_px = w.cam.project(o.pos)
+    arm_px = w.grip_px()  # arm is at its background pose -> no bg-diff evidence
+    fake_detections = [
+        Blob(np.asarray(arm_px), 50000, (0, 0, 200, 200), (0, 0, 0)),   # "the arm"
+        Blob(np.asarray(obj_px), 900, (0, 0, 30, 30), (0, 0, 0)),       # the object
+    ]
+    kept = filter_by_background(fake_detections, frame, bg,
+                                SCFG.bg_thresh, SCFG.obj_min_area)
+    assert len(kept) == 1, f"expected only the real object to survive, got {len(kept)}"
+    assert np.linalg.norm(kept[0].center - obj_px) < 1e-9
+
+
 if __name__ == "__main__":
     for fn in [test_detect_objects_any_color, test_pad_and_hue_selection,
                test_blink_locate, test_locate_by_diff_tracks_carried_object,
-               test_locate_by_diff_rejects_distant_distractor]:
+               test_locate_by_diff_rejects_distant_distractor,
+               test_filter_by_background_drops_arm_detection]:
         fn()
         print(f"ok {fn.__name__}")
     print("ALL OK")

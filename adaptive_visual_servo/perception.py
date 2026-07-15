@@ -107,6 +107,19 @@ def blink_locate(rig, scfg):
     return (weights @ centers) / weights.sum()
 
 
+def filter_by_background(det_blobs, frame, background, thresh=28, min_area=80,
+                         match_r=45.0):
+    """Keep only learned-detector blobs corroborated by background
+    subtraction: a pickable object was placed AFTER the empty-workspace photo,
+    so it must show up in the bg-diff too. Detections with no bg-diff blob
+    nearby are things that were already in the photo -- most importantly the
+    robot arm itself, which a COCO detector will happily box (observed:
+    nanodet's largest detection was the arm, and the servo chased it)."""
+    evidence = find_blobs(diff_mask(frame, background, thresh), min_area)
+    return [b for b in det_blobs
+            if any(np.linalg.norm(b.center - e.center) < match_r for e in evidence)]
+
+
 def _blink_pair(rig, scfg, pair):
     return blink_locate(rig, replace(scfg, blink_dg=pair))
 
