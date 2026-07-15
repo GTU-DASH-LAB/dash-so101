@@ -40,7 +40,7 @@ from pb_sim import PAD_CENTER, PyBulletWorld
 # Tuned for the real URDF gripper mesh's larger blink noise and to bound
 # worst-case retry-cascade cost -- see README.
 PB_SCFG = ServoConfig(tol_coarse_px=18.0, tol_fine_px=12.0, reject_px=45.0,
-                      max_steps=35, retries=1)
+                      max_steps=35, retries=1, measure_every=3)
 
 
 def test_episode_completes_without_crashing():

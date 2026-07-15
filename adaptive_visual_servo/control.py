@@ -69,9 +69,14 @@ def babble(rig, scfg, rng):
 def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px, shape_dq=None):
     """Closed-loop image servo: drive the EE pixel onto target_px.
 
-    `locate(predicted_px) -> px | None` measures the EE after each move (blink
-    while the hand is free, patch tracker while carrying). J is Broyden-updated
-    every step; a no-improvement watchdog aborts instead of oscillating.
+    `locate(predicted_px) -> px | None` measures the EE (blink while the hand
+    is free, bg-diff while carrying). Measuring costs real robot motion
+    (gripper blinks), so it happens only every `scfg.measure_every` steps —
+    in between, the estimated Jacobian dead-reckons (that IS the adaptive
+    model earning its keep). Broyden updates use the accumulated dq since the
+    last good measurement. Success is only ever declared on a fresh
+    measurement, never on prediction. A no-improvement watchdog (counted on
+    measurements) aborts instead of oscillating.
 
     `shape_dq(q) -> dq_extra` adds a correction to every step — used to hold
     height with the nominal model, because a pixel target is a whole 3D camera
@@ -81,18 +86,14 @@ def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px, shape_dq=None):
     """
     target = np.asarray(target_px, float)
     best = np.inf
-    stall = blind = 0
+    stall = blind = since = 0
+    s_base = s_ee.copy()                    # s at last good measurement
+    dq_acc = np.zeros(len(rig.get_q()))     # executed dq since then
+    fresh = True                            # s_ee comes from a measurement
     for _ in range(scfg.max_steps):
         e = target - s_ee
-        err = np.linalg.norm(e)
-        if err <= tol_px and blind == 0:  # never declare success on prediction alone
+        if np.linalg.norm(e) <= tol_px and fresh and blind == 0:
             return True, J, s_ee
-        if err < best - 1.0:
-            best, stall = err, 0
-        else:
-            stall += 1
-            if stall >= scfg.diverge_patience:
-                return False, J, s_ee  # caller re-anchors / re-babbles
         dq = damped_pinv(J, scfg.damping) @ (scfg.lam * e)
         dq = np.clip(dq, -scfg.dq_max, scfg.dq_max)
         q_before = rig.get_q()
@@ -100,7 +101,15 @@ def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px, shape_dq=None):
             dq = np.clip(dq + shape_dq(q_before), -0.2, 0.2)
         rig.set_q(q_before + dq)
         dq_actual = rig.get_q() - q_before  # post-clamp truth
+        dq_acc += dq_actual
         s_pred = s_ee + J @ dq_actual
+        since += 1
+        # dead-reckon between measurements — unless prediction says we're at
+        # the target, which must be confirmed by a real measurement
+        if since < scfg.measure_every and np.linalg.norm(target - s_pred) > tol_px:
+            s_ee, fresh = s_pred, False
+            continue
+        since = 0
         s_new = locate(s_pred)
         # measurement gate: a blink/track wildly off the motion model is an
         # outlier (degenerate blink geometry, occlusion) — remeasure once,
@@ -111,12 +120,20 @@ def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px, shape_dq=None):
             blind += 1
             if blind > scfg.max_blind:
                 return False, J, s_ee
-            s_ee = s_pred
+            s_ee, fresh = s_pred, False
             continue
         blind = 0
-        J = broyden_update(J, dq_actual, s_new - s_ee,
+        J = broyden_update(J, dq_acc, s_new - s_base,
                            scfg.broyden_beta, scfg.min_dq)
-        s_ee = s_new
+        s_ee, s_base, fresh = s_new, s_new.copy(), True
+        dq_acc = np.zeros_like(dq_acc)
+        err = np.linalg.norm(target - s_new)
+        if err < best - 1.0:
+            best, stall = err, 0
+        else:
+            stall += 1
+            if stall >= scfg.diverge_patience:
+                return False, J, s_ee  # caller re-anchors / re-babbles
     return False, J, s_ee
 
 
@@ -140,7 +157,7 @@ def nominal_z_to(rig, model, z_target, scfg, after_step=None):
 
 
 def run_episode(rig, model, scfg, background, rng,
-                target_hue=None, detector=None, J=None):
+                target_hue=None, detector=None, J=None, debug=None):
     """One pick-and-place: DETECT -> (BABBLE) -> SERVO_XY -> interleaved
     DESCEND -> GRASP -> LIFT -> TRANSPORT -> lower+re-servo -> RELEASE -> HOME.
 
@@ -149,9 +166,12 @@ def run_episode(rig, model, scfg, background, rng,
     `detector`: optional plug-in `f(frame) -> [Blob]` (e.g. a learned model)
     replacing background subtraction.
     `J`: reuse a Jacobian from a previous episode; babbles fresh if None.
+    `debug`: optional callable(dict) fed detection/target/EE-estimate events,
+    for live visualization (see run_pb_sim.py's controller-view window).
     Returns dict(ok, reason, J).
     """
     home_q = rig.get_q()
+    debug = debug or (lambda ev: None)
 
     def fail(reason):
         rig.set_gripper(1.0)
@@ -178,6 +198,7 @@ def run_episode(rig, model, scfg, background, rng,
     if tgt is None:
         return fail("no object matches requested hue")
     obj_px = np.asarray(tgt.center)
+    debug(dict(blobs=blobs, pad_px=pad_px, target=obj_px))
 
     try:
         if J is None:
@@ -196,14 +217,23 @@ def run_episode(rig, model, scfg, background, rng,
     # calibration fails (symmetric grippers return (0,0) and behave as before).
     grasp_ab = calibrate_grasp_frame(rig, scfg)
 
-    def bl(pred):
-        if grasp_ab is not None:
-            return locate_grasp_point(rig, scfg, grasp_ab)
-        return blink_locate(rig, scfg)
+    def loc_coarse(pred):
+        """Raw blink: one gripper wiggle. Cheap; tracks the moving jaw --
+        fine for the coarse traverse, the ~40px jaw offset doesn't matter
+        until we're lining up the grasp."""
+        r = blink_locate(rig, scfg)
+        debug(dict(s=r))
+        return r
 
-    s2 = bl(None)  # re-anchor: babble measured the raw blink point, not this one
-    if s2 is not None:
-        s = s2
+    def loc_fine(pred):
+        """Closure-point locator: two blinks + calibrated offset. Used for
+        descend/grasp alignment where the aim point must be the real grasp
+        point, not the moving jaw."""
+        if grasp_ab is None:
+            return loc_coarse(pred)
+        r = locate_grasp_point(rig, scfg, grasp_ab)
+        debug(dict(s=r))
+        return r
 
     def z_hold(z_ref):
         """Per-step correction keeping nominal height at z_ref while the
@@ -218,36 +248,37 @@ def run_episode(rig, model, scfg, background, rng,
             return np.clip(model.step_dz(q, dz), -scfg.dq_max, scfg.dq_max)
         return f
 
-    def servo_recover(target, tol, hold):
+    def servo_recover(target, tol, hold, loc):
         """Servo with escalating recovery: re-anchor blink, then re-babble."""
         nonlocal J, s
-        ok, J, s = servo_to(rig, scfg, J, s, target, bl, tol, shape_dq=hold)
+        ok, J, s = servo_to(rig, scfg, J, s, target, loc, tol, shape_dq=hold)
         if ok:
             return True
-        s2 = bl(None)
+        s2 = loc(None)
         if s2 is not None:
             s = s2
-        ok, J, s = servo_to(rig, scfg, J, s, target, bl, tol, shape_dq=hold)
+        ok, J, s = servo_to(rig, scfg, J, s, target, loc, tol, shape_dq=hold)
         if ok:
             return True
         try:
             J, _ = babble(rig, scfg, rng)
         except RuntimeError:
             return False  # e.g. EE not visible right now -- recovery failed, not a crash
-        s2 = bl(None)  # babble tracks the raw blink point; re-anchor to ours
+        s2 = loc(None)  # babble tracks the raw blink point; re-anchor to ours
         if s2 is not None:
             s = s2
-        ok, J, s = servo_to(rig, scfg, J, s, target, bl, tol, shape_dq=hold)
+        ok, J, s = servo_to(rig, scfg, J, s, target, loc, tol, shape_dq=hold)
         return ok
 
     # ---- approach + descend + grasp, with retries ----
     grasped = False
     for attempt in range(scfg.retries + 1):
         nominal_z_to(rig, model, scfg.approach_z, scfg)
-        s_up = bl(None)
+        s_up = loc_coarse(None)
         if s_up is not None:
             s = s_up
-        if not servo_recover(obj_px, scfg.tol_coarse_px, z_hold(scfg.approach_z)):
+        if not servo_recover(obj_px, scfg.tol_coarse_px, z_hold(scfg.approach_z),
+                             loc_coarse):
             return fail("approach servo failed")
         # interleaved descend: parallax shrinks as height drops. Capped, not
         # `while True` -- a real IK backend (unlike the toy sim's always-
@@ -261,10 +292,10 @@ def run_episode(rig, model, scfg, background, rng,
                 break
             stage = max(scfg.grasp_z, z - scfg.approach_dz)
             nominal_z_to(rig, model, stage, scfg)
-            s2 = bl(None)
+            s2 = loc_fine(None)
             if s2 is not None:
                 s = s2
-            if not servo_recover(obj_px, scfg.tol_fine_px, z_hold(stage)):
+            if not servo_recover(obj_px, scfg.tol_fine_px, z_hold(stage), loc_fine):
                 ok_descend = False
                 break
         else:
@@ -300,9 +331,12 @@ def run_episode(rig, model, scfg, background, rng,
         return fail("object dropped during lift")
 
     def tr(pred):
-        return locate_by_diff(rig.read(), background, pred, scfg.track_roi,
-                              scfg.bg_thresh, scfg.obj_min_area, scfg.track_max_jump)
+        r = locate_by_diff(rig.read(), background, pred, scfg.track_roi,
+                           scfg.bg_thresh, scfg.obj_min_area, scfg.track_max_jump)
+        debug(dict(s=r))
+        return r
 
+    debug(dict(target=pad_px))  # carrying: the goal is the pad now
     ok, J, s = servo_to(rig, scfg, J, s, pad_px, tr, scfg.tol_coarse_px,
                         shape_dq=z_hold(scfg.lift_z))
     if not ok:

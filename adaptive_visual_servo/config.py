@@ -55,6 +55,9 @@ class ServoConfig:
     tol_fine_px: float = 4.0
     max_steps: int = 60
     diverge_patience: int = 5
+    measure_every: int = 1  # steps between real EE measurements (gripper blinks
+                            # cost robot motion; >1 dead-reckons on J between
+                            # them -- pb/real configs use 3 for ~3x fewer blinks)
     # descend
     approach_dz: float = 0.02       # descend increment between XY re-servos
     approach_z: float = 0.075       # nominal EE height for the coarse approach

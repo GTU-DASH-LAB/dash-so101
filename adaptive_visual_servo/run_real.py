@@ -147,7 +147,8 @@ def main():
         # tol_coarse_px=7/tol_fine_px=4 just chatters forever on real-mesh
         # blink_locate noise -- start looser here too, tune further once you
         # can watch the real camera's actual blink noise on hardware.
-        scfg = ServoConfig(tol_coarse_px=18.0, tol_fine_px=12.0, reject_px=45.0)
+        scfg = ServoConfig(tol_coarse_px=18.0, tol_fine_px=12.0, reject_px=45.0,
+                           measure_every=3)  # blink 1/3 as often; J dead-reckons between
         rng = np.random.default_rng(args.seed)
         detector = None
         if args.detector == "nanodet":
