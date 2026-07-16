@@ -115,9 +115,19 @@ class RealConfig:
     # arm's actual STS3215 speed (this project has never run on real hardware).
     settle_floor_s: float = 0.05
     settle_full_move_s: float = 0.3
-    gripper_open_pos: float = 50.0  # gripper joint value at g=1.0 (calibrate!)
-    gripper_closed_pos: float = 5.0
-    load_threshold: int = 300       # |Present_Load| indicating contact (calibrate!)
+    # gripper.pos is lerobot-normalized 0-100 over the range recorded during
+    # `lerobot` motor calibration (verified against this machine's
+    # avs_follower.json: 2022->3531 ticks, ~133deg of servo travel), so use
+    # the WHOLE range. The old placeholders (open=50, closed=5) meant the
+    # gripper never opened past HALF -- possibly too narrow to straddle the
+    # object during approach -- and "grasp close" from the blink-low position
+    # was a barely-visible 18-unit squeeze. lerobot's convention is higher =
+    # more open; if YOUR gripper visibly closes when an episode starts
+    # (g=1.0 should open it), swap these two values.
+    gripper_open_pos: float = 100.0  # gripper joint value at g=1.0
+    gripper_closed_pos: float = 0.0
+    load_threshold: int = 300       # |Present_Load| indicating contact (still a
+                                    # guess -- watch --calibrate-gripper's printout)
     # soft joint limits (deg), straight from the real URDF's own <limit> tags
     # (assets/SO101/so101_new_calib.urdf) -- authoritative, not guessed.
     q_min_deg: tuple = (-110.0, -100.0, -96.83, -95.0, -157.21)
