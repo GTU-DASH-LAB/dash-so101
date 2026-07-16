@@ -157,7 +157,8 @@ def nominal_z_to(rig, model, z_target, scfg, after_step=None):
 
 
 def run_episode(rig, model, scfg, background, rng,
-                target_hue=None, detector=None, J=None, debug=None):
+                target_hue=None, detector=None, J=None, debug=None,
+                manual_target_px=None, manual_pad_px=None):
     """One pick-and-place: DETECT -> (BABBLE) -> SERVO_XY -> interleaved
     DESCEND -> GRASP -> LIFT -> TRANSPORT -> lower+re-servo -> RELEASE -> HOME.
 
@@ -168,6 +169,12 @@ def run_episode(rig, model, scfg, background, rng,
     `J`: reuse a Jacobian from a previous episode; babbles fresh if None.
     `debug`: optional callable(dict) fed detection/target/EE-estimate events,
     for live visualization (see run_pb_sim.py's controller-view window).
+    `manual_target_px`/`manual_pad_px`: skip detection entirely and servo to
+    a human-picked pixel instead -- e.g. clicked in a UI. Manual XY is exactly
+    as valid a target as a detected one: the servo only ever needs a pixel to
+    aim at, never what put it there. Still adaptive control end to end (still
+    babbles/Broyden-updates the Jacobian, still visually closes the loop) --
+    the only thing skipped is *finding* the pixel, not *reaching* it.
     Returns dict(ok, reason, J).
     """
     home_q = rig.get_q()
@@ -178,9 +185,12 @@ def run_episode(rig, model, scfg, background, rng,
         return dict(ok=False, reason=reason, J=J)
 
     frame = rig.read()
-    pad_px = detect_pad(frame, scfg.pad_hue, scfg.hue_tol)
-    if pad_px is None:
-        return fail("drop pad not found")
+    if manual_pad_px is not None:
+        pad_px = np.asarray(manual_pad_px, float)
+    else:
+        pad_px = detect_pad(frame, scfg.pad_hue, scfg.hue_tol)
+        if pad_px is None:
+            return fail("drop pad not found")
 
     def find_objects(fr, extra_exclude=()):
         if detector is not None:
@@ -199,15 +209,18 @@ def run_episode(rig, model, scfg, background, rng,
         return [b for b in blobs
                 if all(np.linalg.norm(b.center - np.asarray(p)) > 60 for p in excl)]
 
-    blobs = find_objects(frame)
-    if not blobs:
-        return fail("no objects detected")
-    tgt = (pick_by_hue(blobs, target_hue, scfg.hue_tol)
-           if target_hue is not None else blobs[0])
-    if tgt is None:
-        return fail("no object matches requested hue")
-    obj_px = np.asarray(tgt.center)
-    debug(dict(blobs=blobs, pad_px=pad_px, target=obj_px))
+    if manual_target_px is not None:
+        obj_px = np.asarray(manual_target_px, float)
+    else:
+        blobs = find_objects(frame)
+        if not blobs:
+            return fail("no objects detected")
+        tgt = (pick_by_hue(blobs, target_hue, scfg.hue_tol)
+               if target_hue is not None else blobs[0])
+        if tgt is None:
+            return fail("no object matches requested hue")
+        obj_px = np.asarray(tgt.center)
+    debug(dict(pad_px=pad_px, target=obj_px))
 
     try:
         if J is None:
@@ -314,16 +327,18 @@ def run_episode(rig, model, scfg, background, rng,
             if rig.gripper_contact():
                 grasped = True
                 break
-        # retry: reopen, rise, re-find the object (it may have been nudged)
+        # retry: reopen, rise, re-find the object (it may have been nudged).
+        # Manual target: nothing to re-detect, just retry at the same pixel.
         rig.set_gripper(1.0)
         nominal_z_to(rig, model, scfg.approach_z, scfg)
-        blobs = find_objects(rig.read(), extra_exclude=(s,))
-        if blobs:
-            tgt = (pick_by_hue(blobs, target_hue, scfg.hue_tol)
-                   if target_hue is not None else
-                   min(blobs, key=lambda b: np.linalg.norm(b.center - obj_px)))
-            if tgt is not None:
-                obj_px = np.asarray(tgt.center)
+        if manual_target_px is None:
+            blobs = find_objects(rig.read(), extra_exclude=(s,))
+            if blobs:
+                tgt = (pick_by_hue(blobs, target_hue, scfg.hue_tol)
+                       if target_hue is not None else
+                       min(blobs, key=lambda b: np.linalg.norm(b.center - obj_px)))
+                if tgt is not None:
+                    obj_px = np.asarray(tgt.center)
     if not grasped:
         return fail("grasp failed after retries")
 

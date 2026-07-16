@@ -82,7 +82,12 @@ touches `SimWorld`'s true state.
   interface so `control.py`/`perception.py` are unchanged between sim and real. Drives all 6 real
   motors (5 arm joints directly through the visual servo, gripper separately).
   **Untested on hardware** — the arm/camera aren't connected to this machine. Includes
-  `--calibrate-gripper` to find real `gripper_open_pos`/`gripper_closed_pos`/`load_threshold` values.
+  `--calibrate-gripper` to find real `gripper_open_pos`/`gripper_closed_pos`/`load_threshold` values,
+  and `--ui` for an interactive Tkinter front end (camera browser, arm-port auto-detect, click-to-select
+  pick/drop points) — see "Interactive UI" below.
+- `camera_nanodet_tester.py` — standalone camera + NanoDet tester, independent of the pick-and-place
+  pipeline: list/refresh cameras, open a live preview, toggle NanoDet detection with class-name/score
+  labels drawn on each box. Good first stop for checking a new camera or nanodet itself works at all.
 - `assets/` — downloaded, not authored here: `SO101/` is the real URDF + meshes
   (TheRobotStudio/SO-ARM100), `nanodet/` is the NanoDet-Plus ONNX checkpoint (RangiLyu/nanodet).
 - `tests/` — per-phase assert scripts; run any with `.venv/bin/python adaptive_visual_servo/tests/test_X.py` (pytest-compatible too).
@@ -133,7 +138,33 @@ python adaptive_visual_servo/run_real.py --calibrate-gripper   # find real gripp
 python adaptive_visual_servo/run_real.py --port /dev/ttyACM0 --camera 0 --episodes 5
 python adaptive_visual_servo/run_real.py --classes "sports ball,cup"   # narrow nanodet's classes
 python adaptive_visual_servo/run_real.py --detector bgsub              # any-object fallback
+python adaptive_visual_servo/run_real.py --ui                          # interactive UI, see below
 ```
+
+### Interactive UI (`--ui`)
+
+A Tkinter front end over the same `SO101Rig`/`run_episode` the CLI uses — nothing about the control
+loop changes, only how the target pixel and drop pixel are chosen:
+
+- **Camera**: dropdown + Refresh (probes indices 0-9), Preview button for a live feed before
+  committing to a connection.
+- **Arm port**: Detect Port reuses lerobot's own approach (`lerobot-find-port`) — SO-101 uses a
+  generic USB-serial chip with no reliable ID, so it snapshots ports, has you unplug the cable, and
+  diffs. Or type the port directly if you already know it.
+- **Target selection**: "Auto-detect pick target with NanoDet" checkbox on by default. Uncheck it and
+  click "Set Pick Target" then click anywhere in the video to pick a target pixel manually instead —
+  a clicked pixel is exactly as valid a target as a detected one, `run_episode` never needs to know
+  *how* the pixel was chosen, only where it is. Independently, "Set Drop Location" overrides the
+  color-marked pad with any clicked spot; leave it unset to keep using the pad. Points persist across
+  episodes until you click new ones or hit "Clear points" — click again anytime to update either one.
+- **Run**: Capture Background once (workspace clear), then Run One Episode reuses the babbled
+  Jacobian across runs like the CLI does. The window is unresponsive while the arm actually moves —
+  deliberate, motor commands only ever come from one thread, never racing the live-preview loop.
+
+New capability this required in `control.run_episode`: `manual_target_px`/`manual_pad_px` skip
+detection entirely and servo straight to a given pixel — still the full adaptive control loop
+(babble, Broyden updates, visual servo), just with the "where do I aim" step handed to a human
+instead of a detector. Covered by `tests/test_e2e.py::test_manual_target_and_pad`.
 
 Read `run_real.py`'s module docstring first: per-step clamp (`RealConfig.max_step_deg`),
 soft joint limits, gripper load threshold, and a REQUIRED first run with the

@@ -71,8 +71,30 @@ def test_pick_by_color():
         "blue object should be untouched"
 
 
+def test_manual_target_and_pad():
+    """A human-clicked pixel is exactly as valid a target as a detected
+    one -- run_episode never needs to know an object was there, only where
+    to aim. Skips detection entirely (manual_target_px/manual_pad_px), still
+    exercises the full adaptive control loop (babble, Broyden, visual
+    servo)."""
+    world = SimWorld(SimConfig(), seed=80)
+    rng = np.random.default_rng(80)
+    model = NominalModel(world.cfg, rng)
+    background = world.capture_background()
+    (obj,) = world.spawn_random(1)
+    target_px = world.cam.project(obj.pos)
+    drop_world = np.array([0.10, 0.12, 0.0])  # off the default pad, a "clicked" spot
+    drop_px = world.cam.project(drop_world)
+    res = run_episode(world, model, SCFG, background, rng,
+                      manual_target_px=target_px, manual_pad_px=drop_px)
+    assert res["ok"], f"manual-target episode failed: {res['reason']}"
+    assert np.hypot(obj.pos[0] - drop_world[0], obj.pos[1] - drop_world[1]) < 0.03, \
+        "object should land at the manually clicked drop point, not the color pad"
+
+
 if __name__ == "__main__":
-    for fn in [test_single_object, test_randomized_batch, test_pick_by_color]:
+    for fn in [test_single_object, test_randomized_batch, test_pick_by_color,
+               test_manual_target_and_pad]:
         fn()
         print(f"ok {fn.__name__}")
     print("ALL OK")

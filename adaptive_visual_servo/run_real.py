@@ -116,9 +116,341 @@ def calibrate_gripper(rig: SO101Rig):
         rig.set_gripper(1.0)
 
 
+def find_serial_ports():
+    from serial.tools import list_ports
+    return [p.device for p in list_ports.comports()]
+
+
+def detect_arm_port_dialog(root):
+    """Same approach as lerobot's own lerobot-find-port: SO-101 uses a
+    generic USB-serial chip, so the only reliable way to identify its port is
+    to snapshot ports, have you unplug it, and diff. Returns the port string,
+    or None if it couldn't be determined uniquely."""
+    from tkinter import messagebox
+    before = set(find_serial_ports())
+    messagebox.showinfo(
+        "Detect arm port",
+        "Now unplug the arm's USB cable, then click OK.")
+    after = set(find_serial_ports())
+    diff = before - after
+    if len(diff) == 1:
+        port = diff.pop()
+        messagebox.showinfo("Detect arm port",
+                            f"Found it: {port}\nPlug the cable back in, then click OK.")
+        return port
+    if not diff:
+        messagebox.showerror("Detect arm port",
+                             "No port disappeared -- was the right cable unplugged?")
+    else:
+        messagebox.showerror("Detect arm port",
+                             f"More than one port disappeared: {sorted(diff)}")
+    return None
+
+
+class RealUI:
+    """Interactive front end for run_real.py: browse cameras, auto-detect the
+    arm's USB port, and either let NanoDet pick the target automatically or
+    click a pixel yourself -- pick target and drop point are independent, so
+    you can mix manual and NanoDet-driven picks. Either way it's still full
+    adaptive control underneath (babble/Broyden/visual servo): a clicked
+    pixel is exactly as valid a target as a detected one, run_episode never
+    needs to know how the pixel was chosen.
+
+    The window is unresponsive while an episode runs -- deliberate: robot
+    motor commands only ever come from one thread, never racing the camera
+    preview loop.
+    """
+
+    def __init__(self, root):
+        import tkinter as tk
+        from tkinter import ttk
+        self.tk, self.ttk = tk, ttk
+        self.root = root
+        root.title("SO-101 adaptive visual servo")
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.cfg = RealConfig()
+        self.rig = None
+        self.model = None
+        self.detector = None
+        self._detector_classes = None  # what class_names the loaded detector was built with
+        self.background = None
+        self.J = None
+        self.preview_cap = None       # standalone cv2.VideoCapture, pre-connect only
+        self.last_frame = None
+        self.disp_size = (1, 1)
+        self.click_mode = None        # None | "pick" | "drop"
+        self.pick_px = None
+        self.drop_px = None
+        self.last_debug = {}
+
+        self._build_ui()
+        self.refresh_cameras()
+
+    # ---------- UI construction ----------
+    def _build_ui(self):
+        tk, ttk = self.tk, self.ttk
+        conn = ttk.LabelFrame(self.root, text="Connection", padding=8)
+        conn.pack(fill="x", padx=8, pady=(8, 4))
+
+        ttk.Label(conn, text="Camera:").grid(row=0, column=0, sticky="w")
+        self.cam_var = tk.StringVar()
+        self.cam_combo = ttk.Combobox(conn, textvariable=self.cam_var, state="readonly", width=20)
+        self.cam_combo.grid(row=0, column=1, padx=4)
+        ttk.Button(conn, text="Refresh", command=self.refresh_cameras).grid(row=0, column=2, padx=2)
+        self.preview_btn = ttk.Button(conn, text="Preview", command=self.toggle_preview)
+        self.preview_btn.grid(row=0, column=3, padx=2)
+
+        ttk.Label(conn, text="Arm port:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.port_var = tk.StringVar(value=self.cfg.port)
+        ttk.Entry(conn, textvariable=self.port_var, width=22).grid(row=1, column=1, pady=(6, 0))
+        ttk.Button(conn, text="Detect Port",
+                  command=self.on_detect_port).grid(row=1, column=2, pady=(6, 0))
+        self.connect_btn = ttk.Button(conn, text="Connect Arm", command=self.toggle_connect)
+        self.connect_btn.grid(row=1, column=3, pady=(6, 0))
+
+        det = ttk.LabelFrame(self.root, text="Target selection", padding=8)
+        det.pack(fill="x", padx=8, pady=4)
+        self.nanodet_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(det, text="Auto-detect pick target with NanoDet",
+                       variable=self.nanodet_var).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.classes_var = tk.StringVar(value="tabletop")
+        ttk.Label(det, text="Classes:").grid(row=0, column=2, sticky="e", padx=(12, 4))
+        ttk.Combobox(det, textvariable=self.classes_var, state="readonly", width=10,
+                    values=["tabletop", "all"]).grid(row=0, column=3)
+        ttk.Button(det, text="Set Pick Target (click video)",
+                  command=lambda: self.arm_click("pick")).grid(row=1, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(det, text="Set Drop Location (click video)",
+                  command=lambda: self.arm_click("drop")).grid(row=1, column=1, pady=(6, 0), sticky="w")
+        ttk.Button(det, text="Clear points", command=self.clear_points).grid(
+            row=1, column=2, pady=(6, 0))
+        self.points_var = tk.StringVar(value="pick: (manual click needed)  drop: (color pad)")
+        ttk.Label(det, textvariable=self.points_var).grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        run = ttk.LabelFrame(self.root, text="Run", padding=8)
+        run.pack(fill="x", padx=8, pady=4)
+        ttk.Button(run, text="Capture Background",
+                  command=self.on_capture_background).pack(side="left")
+        ttk.Button(run, text="Run One Episode",
+                  command=self.on_run_episode).pack(side="left", padx=6)
+        self.bg_var = tk.StringVar(value="background: not captured")
+        ttk.Label(run, textvariable=self.bg_var).pack(side="left", padx=12)
+
+        self.video_label = ttk.Label(self.root)
+        self.video_label.pack(padx=8, pady=4)
+        self.video_label.bind("<Button-1>", self._on_click)
+
+        self.log = tk.Text(self.root, height=8, width=90, state="disabled")
+        self.log.pack(fill="both", padx=8, pady=(0, 8), expand=True)
+
+    def log_line(self, msg):
+        self.log.config(state="normal")
+        self.log.insert("end", msg + "\n")
+        self.log.see("end")
+        self.log.config(state="disabled")
+
+    # ---------- cameras ----------
+    def refresh_cameras(self):
+        from camera_nanodet_tester import probe_cameras
+        self.log_line("Probing cameras...")
+        self.root.update_idletasks()
+        self.cameras = probe_cameras()
+        values = [f"{i}: {w}x{h}" for i, w, h in self.cameras]
+        self.cam_combo["values"] = values
+        if values:
+            self.cam_combo.current(0)
+        self.log_line(f"Found {len(self.cameras)} camera(s).")
+
+    def toggle_preview(self):
+        import cv2
+        if self.preview_cap is not None:
+            self.preview_cap.release()
+            self.preview_cap = None
+            self.preview_btn.config(text="Preview")
+            return
+        if self.rig is not None:
+            self.log_line("Already connected -- showing the connected camera feed.")
+            return
+        if not self.cameras or not self.cam_var.get():
+            self.log_line("No camera selected -- Refresh first.")
+            return
+        index = self.cameras[self.cam_combo.current()][0]
+        cap = cv2.VideoCapture(index)
+        if not cap.isOpened():
+            self.log_line(f"Could not open camera {index}.")
+            return
+        self.preview_cap = cap
+        self.preview_btn.config(text="Stop Preview")
+        self._update_frame()
+
+    # ---------- port ----------
+    def on_detect_port(self):
+        port = detect_arm_port_dialog(self.root)
+        if port:
+            self.port_var.set(port)
+            self.log_line(f"Arm port set to {port}.")
+
+    # ---------- connect ----------
+    def toggle_connect(self):
+        if self.rig is not None:
+            self.rig.close()
+            self.rig = None
+            self.connect_btn.config(text="Connect Arm")
+            self.log_line("Disconnected.")
+            return
+        if not self.cameras or not self.cam_var.get():
+            self.log_line("Select a camera first.")
+            return
+        if self.preview_cap is not None:  # SO101Rig needs exclusive camera access
+            self.preview_cap.release()
+            self.preview_cap = None
+        self.cfg.port = self.port_var.get()
+        self.cfg.camera_index = self.cameras[self.cam_combo.current()][0]
+        self.log_line("Connecting -- watch the terminal for lerobot calibration "
+                      "prompts if this is a new arm id...")
+        self.root.update_idletasks()
+        try:
+            self.rig = SO101Rig(self.cfg)
+        except Exception as e:  # surfaced to the user, not a crash
+            self.log_line(f"Connect failed: {e}")
+            return
+        self.model = PlacoModel()
+        self.connect_btn.config(text="Disconnect")
+        self.log_line("Connected.")
+        self._update_frame()
+
+    # ---------- target/drop selection ----------
+    def arm_click(self, mode):
+        self.click_mode = mode
+        self.log_line(f"Click the video to set the {mode.upper()} point.")
+
+    def clear_points(self):
+        self.pick_px = self.drop_px = None
+        self._refresh_points_label()
+
+    def _refresh_points_label(self):
+        pick = "manual click needed" if self.pick_px is None else np.round(self.pick_px, 0).tolist()
+        if self.nanodet_var.get():
+            pick = "NanoDet auto-detect"
+        drop = "color pad" if self.drop_px is None else np.round(self.drop_px, 0).tolist()
+        self.points_var.set(f"pick: {pick}   drop: {drop}")
+
+    def _on_click(self, event):
+        if self.click_mode is None or self.last_frame is None:
+            return
+        raw_h, raw_w = self.last_frame.shape[:2]
+        disp_w, disp_h = self.disp_size
+        px = np.array([event.x * raw_w / disp_w, event.y * raw_h / disp_h])
+        if self.click_mode == "pick":
+            self.pick_px = px
+        else:
+            self.drop_px = px
+        self.click_mode = None
+        self._refresh_points_label()
+
+    # ---------- background ----------
+    def on_capture_background(self):
+        if self.rig is None:
+            self.log_line("Connect the arm first.")
+            return
+        self.log_line("Capturing background -- workspace should be clear of objects.")
+        self.background = self.rig.capture_background()
+        self.bg_var.set("background: captured")
+
+    # ---------- run ----------
+    def on_run_episode(self):
+        if self.rig is None:
+            self.log_line("Connect the arm first.")
+            return
+        if self.background is None:
+            self.log_line("Capture the background first.")
+            return
+        if not self.nanodet_var.get() and self.pick_px is None:
+            self.log_line("NanoDet is off -- click 'Set Pick Target' and click the video first.")
+            return
+
+        detector = None
+        if self.nanodet_var.get():
+            classes = None if self.classes_var.get() == "all" else TABLETOP_CLASSES
+            if self.detector is None or self._detector_classes != classes:
+                self.log_line("Loading NanoDet...")
+                self.root.update_idletasks()
+                self.detector = NanodetDetector(class_names=classes)
+                self._detector_classes = classes
+            detector = self.detector
+
+        scfg = ServoConfig(tol_coarse_px=18.0, tol_fine_px=12.0, reject_px=45.0,
+                          measure_every=3)
+        rng = np.random.default_rng(0)
+        self.log_line("Running episode -- window will be unresponsive while the arm moves...")
+        self.root.update_idletasks()
+        res = run_episode(
+            self.rig, self.model, scfg, self.background, rng,
+            detector=detector, J=self.J,
+            manual_target_px=None if self.nanodet_var.get() else self.pick_px,
+            manual_pad_px=self.drop_px,
+            debug=lambda ev: self.last_debug.update(ev))
+        self.J = res["J"]
+        self.log_line(f"Result: {res['reason']!r}")
+        self._update_frame()
+
+    # ---------- live preview ----------
+    def _update_frame(self):
+        from PIL import Image, ImageTk
+        import cv2
+        if self.rig is not None:
+            frame = self.rig.read()  # rig.read() returns the frame directly
+        elif self.preview_cap is not None:
+            ok, frame = self.preview_cap.read()  # raw cv2.VideoCapture: (ok, frame)
+            if not ok:
+                frame = None
+        else:
+            return
+        if frame is None:
+            self.root.after(200, self._update_frame)
+            return
+        self.last_frame = frame
+        img = frame.copy()
+        if self.pick_px is not None:
+            cv2.drawMarker(img, tuple(np.int32(self.pick_px)), (0, 0, 255),
+                           cv2.MARKER_CROSS, 18, 2)
+        if self.drop_px is not None:
+            cv2.drawMarker(img, tuple(np.int32(self.drop_px)), (200, 0, 200),
+                           cv2.MARKER_TILTED_CROSS, 18, 2)
+        s = self.last_debug.get("s")
+        if s is not None:
+            cv2.drawMarker(img, tuple(np.int32(s)), (0, 220, 255), cv2.MARKER_CROSS, 14, 2)
+        h, w = img.shape[:2]
+        self.disp_size = (w, h)
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        self._imgtk = ImageTk.PhotoImage(image=Image.fromarray(rgb))
+        self.video_label.config(image=self._imgtk)
+        self._refresh_points_label()
+        self.root.after(30, self._update_frame)
+
+    def on_close(self):
+        if self.preview_cap is not None:
+            self.preview_cap.release()
+        if self.rig is not None:
+            self.rig.set_gripper(1.0)
+            self.rig.close()
+        self.root.destroy()
+
+
+def run_ui():
+    import tkinter as tk
+    root = tk.Tk()
+    RealUI(root)
+    root.mainloop()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     cfg = RealConfig()
+    ap.add_argument("--ui", action="store_true",
+                    help="interactive UI: browse cameras, auto-detect the arm port, "
+                         "click a pick target and/or drop location, run episodes")
     ap.add_argument("--port", default=cfg.port)
     ap.add_argument("--camera", type=int, default=cfg.camera_index)
     ap.add_argument("--id", default=cfg.robot_id)
@@ -135,6 +467,10 @@ def main():
                     help="comma-separated COCO class allowlist for nanodet "
                          f"(default: {','.join(TABLETOP_CLASSES)}; 'all' = all 80)")
     args = ap.parse_args()
+
+    if args.ui:
+        run_ui()
+        return
 
     cfg.port, cfg.camera_index, cfg.robot_id = args.port, args.camera, args.id
     rig = SO101Rig(cfg)
