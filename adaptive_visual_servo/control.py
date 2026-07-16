@@ -44,6 +44,7 @@ def babble(rig, scfg, rng):
     amp = np.full(n, scfg.babble_step)
     q = q0.copy()
     dqs, dss = [], []
+    n_none = n_glitch = 0
     for _ in range(scfg.babble_probes):
         q_target = q0 + rng.uniform(-1.5, 1.5, n) * amp  # leash: stay near q0
         step = np.clip(q_target - q, -amp, amp)
@@ -52,13 +53,24 @@ def babble(rig, scfg, rng):
         q = rig.get_q()  # post-clamp truth
         dq = q - q_before
         s_new = blink_locate(rig, scfg)
-        if s_new is None or np.linalg.norm(s_new - s) > 120:
-            continue  # EE occluded/off-frame or glitch: drop the pair
+        if s_new is None:
+            n_none += 1
+            continue  # blink found no gripper motion in the image
+        if np.linalg.norm(s_new - s) > 120:
+            n_glitch += 1
+            continue  # jumped implausibly far: occlusion/misdetection glitch
         dqs.append(dq)
         dss.append(s_new - s)
         s = s_new
     if len(dqs) < 2 * n:
-        raise RuntimeError(f"babble: only {len(dqs)} usable probes")
+        raise RuntimeError(
+            f"babble: only {len(dqs)}/{scfg.babble_probes} usable probes "
+            f"({n_none} blinks saw no gripper motion, {n_glitch} jumped >120px). "
+            "On real hardware, usual causes in order: gripper_open_pos/"
+            "gripper_closed_pos miscalibrated so the fingers barely move "
+            "between blink positions (run --calibrate-gripper, then use the "
+            "UI's Test Blink), camera auto-exposure flicker, or the gripper "
+            "out of the camera's view at the babble pose.")
     Q, S = np.stack(dqs), np.stack(dss)
     if np.linalg.matrix_rank(Q, tol=1e-4) < n:
         raise RuntimeError("babble: probes do not span joint space")

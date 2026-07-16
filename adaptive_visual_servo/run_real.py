@@ -61,7 +61,18 @@ class SO101Rig:
             port=cfg.port, id=cfg.robot_id, cameras={"cam": cam},
             max_relative_target=None,  # we apply our own smaller per-step clamp
             use_degrees=True))
-        self.robot.connect(calibrate=True)
+        # Feetech buses routinely fail the very first write after power-on
+        # ("no status packet" on some motor id) and succeed on the next try --
+        # observed on the first real connect. One automatic retry.
+        try:
+            self.robot.connect(calibrate=True)
+        except Exception:
+            try:
+                self.robot.disconnect()
+            except Exception:
+                pass
+            time.sleep(1.0)
+            self.robot.connect(calibrate=True)
         self._g = 1.0
 
     def close(self):
@@ -265,6 +276,8 @@ class RealUI:
         self.bg_btn = ttk.Button(run, text="Capture Background",
                                  command=self.on_capture_background)
         self.bg_btn.pack(side="left")
+        self.blink_btn = ttk.Button(run, text="Test Blink", command=self.on_test_blink)
+        self.blink_btn.pack(side="left", padx=6)
         self.run_btn = ttk.Button(run, text="Run One Episode", command=self.on_run_episode)
         self.run_btn.pack(side="left", padx=6)
         self.bg_var = tk.StringVar(value="background: not captured")
@@ -392,6 +405,45 @@ class RealUI:
         self.bg_var.set("background: captured")
 
     # ---------- run ----------
+    def on_test_blink(self):
+        """One gripper blink with full diagnostics -- the first thing to try
+        when babble reports unusable probes. Shows whether the camera can see
+        the gripper move at all, and how strongly."""
+        if self.rig is None or self.episode_running:
+            self.log_line("Connect the arm first (and wait for any running episode).")
+            return
+        from perception import diff_mask, find_blobs
+        scfg = ServoConfig()
+        g_open, g_mid = scfg.blink_dg
+        self.rig.set_gripper(g_open)
+        a = self.rig.read()
+        self.rig.set_gripper(g_mid)
+        b = self.rig.read()
+        self.rig.set_gripper(g_open)
+        blobs = find_blobs(diff_mask(a, b, scfg.diff_thresh), scfg.min_blob)
+        kept = [x for x in blobs if x.area <= scfg.blink_max_blob]
+        if not blobs:
+            self.log_line(
+                "Test Blink: NO pixel change seen between gripper positions. "
+                "Either the fingers barely move (check gripper_open_pos/"
+                "gripper_closed_pos -- run --calibrate-gripper) or the gripper "
+                "is out of the camera's view.")
+        elif not kept:
+            self.log_line(
+                f"Test Blink: only huge diff blobs (largest {blobs[0].area}px^2 > "
+                f"blink_max_blob={scfg.blink_max_blob}) -- looks like a global "
+                "image change (auto-exposure flicker, something else moving), "
+                "not finger motion. Lock the camera's exposure if possible.")
+        else:
+            w = np.array([x.area for x in kept], float)
+            c = np.stack([x.center for x in kept])
+            px = (w @ c) / w.sum()
+            self.last_debug["s"] = px
+            self.log_line(
+                f"Test Blink OK: gripper seen at {np.round(px, 0).tolist()} "
+                f"({len(kept)} blob(s), areas {[x.area for x in kept]}px^2) -- "
+                "marked with the yellow cross.")
+
     def on_run_episode(self):
         if self.episode_running:
             return  # button is disabled during a run, but guard anyway
@@ -429,7 +481,7 @@ class RealUI:
         # below so nothing else can touch the camera or motors concurrently.
         self.episode_running = True
         self._episode_result = None
-        for b in (self.connect_btn, self.preview_btn, self.bg_btn, self.run_btn):
+        for b in (self.connect_btn, self.preview_btn, self.bg_btn, self.blink_btn, self.run_btn):
             b.config(state="disabled")
         self.log_line("Running episode (window stays responsive; video keeps updating)...")
 
@@ -456,7 +508,7 @@ class RealUI:
         self.J = res["J"]
         self.log_line(f"Result: {res['reason']!r}")
         self.episode_running = False
-        for b in (self.connect_btn, self.preview_btn, self.bg_btn, self.run_btn):
+        for b in (self.connect_btn, self.preview_btn, self.bg_btn, self.blink_btn, self.run_btn):
             b.config(state="normal")
 
     # ---------- live preview ----------

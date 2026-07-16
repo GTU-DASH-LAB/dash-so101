@@ -21,6 +21,12 @@ class Blob:
 
 def diff_mask(a, b, thresh):
     d = cv2.absdiff(a, b).max(axis=2)
+    # cancel global exposure/white-balance shifts between the two frames:
+    # real webcams auto-adjust between captures, which puts a uniform pedestal
+    # under the whole diff -- the median estimates that pedestal (real motion
+    # covers few pixels, so it barely affects the median) and removing it
+    # keeps thresholding about MOTION, not lighting
+    d = cv2.subtract(d, int(np.median(d)))
     d = cv2.GaussianBlur(d, (5, 5), 0)
     return (d > thresh).astype(np.uint8)
 
@@ -99,6 +105,10 @@ def blink_locate(rig, scfg):
     b = rig.read()
     rig.set_gripper(g_open)
     blobs = find_blobs(diff_mask(a, b, scfg.diff_thresh), scfg.min_blob)
+    # a blink is a SMALL region (just the fingers); a huge diff blob is a
+    # global change (exposure jump, someone walked through frame, arm shadow)
+    # and would drag the centroid to nonsense -- drop those
+    blobs = [x for x in blobs if x.area <= scfg.blink_max_blob]
     if not blobs:
         return None
     # each finger sweep is its own component: area-weighted mean = gripper center

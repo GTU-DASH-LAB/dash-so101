@@ -93,6 +93,25 @@ def test_locate_by_diff_rejects_distant_distractor():
                           SCFG.obj_min_area, SCFG.track_max_jump) is None
 
 
+def test_diff_mask_ignores_global_exposure_shift():
+    """First real-hardware run failed babble with 'only 4 usable probes': the
+    webcam's auto-exposure shifted the WHOLE frame between the two blink
+    captures, so the raw diff lit up all 307k pixels and the blink centroid
+    was frame-center garbage every time. diff_mask now subtracts the median
+    diff (the global pedestal) so thresholding is about motion, not lighting."""
+    from perception import diff_mask, find_blobs
+    rng = np.random.default_rng(0)
+    a = rng.integers(80, 170, (480, 640, 3)).astype(np.uint8)
+    b = np.clip(a.astype(int) + 12, 0, 255).astype(np.uint8)  # global AE shift
+    b[200:230, 300:320] = 255                                  # real motion patch
+    m = diff_mask(a, b, SCFG.diff_thresh)
+    assert m.sum() < 8000, "global exposure shift must not light up the frame"
+    blobs = find_blobs(m, SCFG.min_blob)
+    assert blobs, "the genuinely moved patch must still be found"
+    assert np.linalg.norm(blobs[0].center - [310, 215]) < 15, \
+        "blob must be at the moved patch, not the frame center"
+
+
 def test_filter_by_background_drops_arm_detection():
     """A learned detector will happily box the robot arm itself (seen live
     with nanodet in the pybullet GUI: its biggest detection was the arm, and
@@ -119,6 +138,7 @@ if __name__ == "__main__":
     for fn in [test_detect_objects_any_color, test_pad_and_hue_selection,
                test_blink_locate, test_locate_by_diff_tracks_carried_object,
                test_locate_by_diff_rejects_distant_distractor,
+               test_diff_mask_ignores_global_exposure_shift,
                test_filter_by_background_drops_arm_detection]:
         fn()
         print(f"ok {fn.__name__}")

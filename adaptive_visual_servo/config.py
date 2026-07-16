@@ -72,9 +72,15 @@ class ServoConfig:
                                     # centroid bias on the real URDF gripper
                                     # mesh (pb_sim: ~39px -> ~28px mean, still
                                     # a real bias -- see README calibration note)
-    diff_thresh: int = 10           # blink slivers are blur-attenuated; noise floor ~4
+    diff_thresh: int = 7            # blink slivers are blur-attenuated. diff_mask
+                                    # subtracts the median (noise/exposure pedestal,
+                                    # ~3 levels) first, so the floor sits lower than
+                                    # the raw-diff era's ~4 -- same margin as the
+                                    # old 10 over the old floor
     bg_thresh: int = 28
     min_blob: int = 25
+    blink_max_blob: int = 6000      # px^2; a blink diff is just the fingers -- bigger
+                                    # blobs are exposure jumps/passers-by, not motion
     reject_px: float = 28.0         # measurement gate vs. J-predicted EE motion
     max_blind: int = 2              # consecutive steps allowed on prediction only
     obj_min_area: int = 80
