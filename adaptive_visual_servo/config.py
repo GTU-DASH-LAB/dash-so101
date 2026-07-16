@@ -81,6 +81,10 @@ class ServoConfig:
     min_blob: int = 25
     blink_max_blob: int = 6000      # px^2; a blink diff is just the fingers -- bigger
                                     # blobs are exposure jumps/passers-by, not motion
+    blink_null_gap_s: float = 0.0   # spacing of the null (no-command) frame pair.
+                                    # Real cameras need ~0.15s so the pair isn't the
+                                    # same buffered frame (run_real sets this); sims
+                                    # render fresh frames per read, 0 keeps tests fast
     reject_px: float = 28.0         # measurement gate vs. J-predicted EE motion
     max_blind: int = 2              # consecutive steps allowed on prediction only
     obj_min_area: int = 80
@@ -126,8 +130,18 @@ class RealConfig:
     # (g=1.0 should open it), swap these two values.
     gripper_open_pos: float = 100.0  # gripper joint value at g=1.0
     gripper_closed_pos: float = 0.0
-    load_threshold: int = 300       # |Present_Load| indicating contact (still a
-                                    # guess -- watch --calibrate-gripper's printout)
+    gripper_settle_full_s: float = 1.2  # full open<->close sweep time. Measured on
+                                        # this arm: ~90 normalized-units/s, so 100
+                                        # units ~= 1.1s -- at 0.75s it was still only
+                                        # at pos 27.8 with a +500 in-motion load
+    load_threshold: int = 300       # SIGNED Present_Load indicating the gripper is
+                                    # squeezing something (measured: settled on empty
+                                    # air = +104..108; in-motion transients hit +-500,
+                                    # which is why contact ALSO requires the jaw to
+                                    # have stalled short of its commanded position)
+    grasp_stall_gap: float = 10.0   # normalized units the jaw must stop short of its
+                                    # close command to count as 'object between jaws'
+                                    # (empty-air close arrives within ~2 units)
     # soft joint limits (deg), straight from the real URDF's own <limit> tags
     # (assets/SO101/so101_new_calib.urdf) -- authoritative, not guessed.
     q_min_deg: tuple = (-110.0, -100.0, -96.83, -95.0, -157.21)

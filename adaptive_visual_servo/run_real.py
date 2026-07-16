@@ -106,11 +106,29 @@ class SO101Rig:
         pos_before = c.gripper_closed_pos + g_before * (c.gripper_open_pos - c.gripper_closed_pos)
         pos = c.gripper_closed_pos + self._g * (c.gripper_open_pos - c.gripper_closed_pos)
         self.robot.send_action({"gripper.pos": float(pos)})
-        self._settle(pos - pos_before, abs(c.gripper_open_pos - c.gripper_closed_pos))
+        # gripper gets its own (longer) full-move settle: measured on this arm,
+        # a full sweep is still in flight at 0.5s -- much slower than a clamped
+        # 4-degree arm step
+        frac = min(abs(pos - pos_before) / abs(c.gripper_open_pos - c.gripper_closed_pos), 1.0)
+        time.sleep(c.settle_floor_s + frac * c.gripper_settle_full_s)
 
     def gripper_contact(self):
-        load = abs(self.robot.bus.read("Present_Load", "gripper"))
-        return self._g < 0.5 and load > self.cfg.load_threshold
+        # An object between the jaws physically STOPS them short of the close
+        # command; empty air lets them arrive (measured: within ~2 normalized
+        # units). Position error is the primary signal because instantaneous
+        # load cannot distinguish 'working hard to move' from 'squeezing':
+        # measured +500 mid-travel on EMPTY AIR (same as the torque limit).
+        # The signed-load check (closing/holding = positive on this arm)
+        # confirms the jaw is actively pressing, not just parked.
+        c = self.cfg
+        if self._g >= 0.5:
+            return False
+        cmd = c.gripper_closed_pos + self._g * (c.gripper_open_pos - c.gripper_closed_pos)
+        pos = self.robot.bus.read("Present_Position", "gripper")
+        toward_open = 1.0 if c.gripper_open_pos > c.gripper_closed_pos else -1.0
+        stalled = (pos - cmd) * toward_open > c.grasp_stall_gap
+        load = self.robot.bus.read("Present_Load", "gripper")
+        return stalled and load > c.load_threshold
 
     def read(self):
         return self.robot.cameras["cam"].read_latest()
@@ -412,37 +430,26 @@ class RealUI:
         if self.rig is None or self.episode_running:
             self.log_line("Connect the arm first (and wait for any running episode).")
             return
-        from perception import diff_mask, find_blobs
-        scfg = ServoConfig()
-        g_open, g_mid = scfg.blink_dg
-        self.rig.set_gripper(g_open)
-        a = self.rig.read()
-        self.rig.set_gripper(g_mid)
-        b = self.rig.read()
-        self.rig.set_gripper(g_open)
-        blobs = find_blobs(diff_mask(a, b, scfg.diff_thresh), scfg.min_blob)
-        kept = [x for x in blobs if x.area <= scfg.blink_max_blob]
-        if not blobs:
-            self.log_line(
-                "Test Blink: NO pixel change seen between gripper positions. "
-                "Either the fingers barely move (check gripper_open_pos/"
-                "gripper_closed_pos -- run --calibrate-gripper) or the gripper "
-                "is out of the camera's view.")
-        elif not kept:
-            self.log_line(
-                f"Test Blink: only huge diff blobs (largest {blobs[0].area}px^2 > "
-                f"blink_max_blob={scfg.blink_max_blob}) -- looks like a global "
-                "image change (auto-exposure flicker, something else moving), "
-                "not finger motion. Lock the camera's exposure if possible.")
-        else:
-            w = np.array([x.area for x in kept], float)
-            c = np.stack([x.center for x in kept])
-            px = (w @ c) / w.sum()
+        from perception import blink_measure
+        scfg = ServoConfig(blink_null_gap_s=0.15)
+        px, info = blink_measure(self.rig, scfg)
+        if px is not None:
             self.last_debug["s"] = px
             self.log_line(
                 f"Test Blink OK: gripper seen at {np.round(px, 0).tolist()} "
-                f"({len(kept)} blob(s), areas {[x.area for x in kept]}px^2) -- "
-                "marked with the yellow cross.")
+                f"({info['n_kept']} blob(s), areas {info['areas']}px^2, "
+                f"scene-noise mask {info['noise_px']}px) -- yellow cross.")
+        elif info["n_raw"] > info["n_kept"]:
+            self.log_line(
+                f"Test Blink: only oversized blobs survived the sync filter "
+                f"(>{scfg.blink_max_blob}px^2) -- looks like a global "
+                "image change, not finger motion. Lock camera exposure if possible.")
+        else:
+            self.log_line(
+                f"Test Blink: no command-synchronized motion found "
+                f"(scene-noise mask {info['noise_px']}px). Either the fingers "
+                "barely move between blink positions (check gripper_open_pos/"
+                "closed_pos) or the gripper is out of the camera's view.")
 
     def on_run_episode(self):
         if self.episode_running:
@@ -468,7 +475,7 @@ class RealUI:
             detector = self.detector
 
         scfg = ServoConfig(tol_coarse_px=18.0, tol_fine_px=12.0, reject_px=45.0,
-                          measure_every=3)
+                          measure_every=3, blink_null_gap_s=0.15)
         if not hasattr(self, "rng"):
             self.rng = np.random.default_rng(0)  # persists across episodes, not reseeded each run
         manual_target = None if self.nanodet_var.get() else self.pick_px
@@ -621,7 +628,8 @@ def main():
         # blink_locate noise -- start looser here too, tune further once you
         # can watch the real camera's actual blink noise on hardware.
         scfg = ServoConfig(tol_coarse_px=18.0, tol_fine_px=12.0, reject_px=45.0,
-                           measure_every=3)  # blink 1/3 as often; J dead-reckons between
+                           measure_every=3,  # blink 1/3 as often; J dead-reckons between
+                           blink_null_gap_s=0.15)
         rng = np.random.default_rng(args.seed)
         detector = None
         if args.detector == "nanodet":

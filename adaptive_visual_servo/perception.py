@@ -5,6 +5,7 @@ and a small template tracker for the carry phase.
 Everything works on plain BGR frames — same code for sim and real camera.
 """
 
+import time
 from dataclasses import dataclass, replace
 
 import cv2
@@ -94,27 +95,67 @@ def detect_pad(frame, hue, tol=14, min_area=300):
     return blobs[0].center if blobs else None
 
 
-def blink_locate(rig, scfg):
-    """Markerless EE localization: wiggle only the gripper fingers between two
-    frames — the diff blob is exactly the fingers. Returns (u, v) or None.
-    Never call while holding an object."""
+def blink_measure(rig, scfg):
+    """Markerless EE localization by synchronous detection: the gripper is
+    the only thing in the scene that changes exactly WHEN commanded, in BOTH
+    directions, at the SAME place.
+
+    A single before/after diff (the naive version) fails on real cameras:
+    compression shimmer, specular surfaces, and passers-by produce dozens of
+    diff blobs per frame pair and the centroid lands anywhere (observed live:
+    13-33 blobs, position jumping across the whole frame). Instead:
+
+      1. null pair (a1, a2): two frames with NO command between them --
+         anything that differs is in-place scene flicker (monitor, specular
+         shimmer), dilated into an exclusion mask
+      2. two INDEPENDENT diff pairs that share no frame: (a2 open vs b1 mid)
+         AND (b2 mid vs c open). The fingers moved away and back, so they
+         mark the same pixels in both pairs. A one-frame transient (codec
+         speckle) can't repeat across two disjoint pairs -- note a single
+         mid-frame shared by both diffs WOULD leak its own speckles through
+         the AND, which is why b is captured twice. A continuously moving
+         person marks leading/trailing edges at different places in each
+         pair, so their AND is empty too.
+
+    Returns (px | None, info dict) -- info carries diagnostics for the UI's
+    Test Blink. Never call while holding an object."""
     g_open, g_mid = scfg.blink_dg
+
+    def read_pair():
+        f1 = rig.read()
+        if scfg.blink_null_gap_s > 0:  # real cameras: avoid the same buffered frame
+            time.sleep(scfg.blink_null_gap_s)
+        return f1, rig.read()
+
     rig.set_gripper(g_open)
-    a = rig.read()
+    a1, a2 = read_pair()
     rig.set_gripper(g_mid)
-    b = rig.read()
+    b1, b2 = read_pair()
     rig.set_gripper(g_open)
-    blobs = find_blobs(diff_mask(a, b, scfg.diff_thresh), scfg.min_blob)
-    # a blink is a SMALL region (just the fingers); a huge diff blob is a
-    # global change (exposure jump, someone walked through frame, arm shadow)
-    # and would drag the centroid to nonsense -- drop those
-    blobs = [x for x in blobs if x.area <= scfg.blink_max_blob]
-    if not blobs:
-        return None
+    c = rig.read()
+
+    m_null = diff_mask(a1, a2, scfg.diff_thresh)
+    m = cv2.bitwise_and(diff_mask(a2, b1, scfg.diff_thresh),
+                        diff_mask(b2, c, scfg.diff_thresh))
+    m[cv2.dilate(m_null, np.ones((9, 9), np.uint8)) > 0] = 0
+
+    blobs = find_blobs(m, scfg.min_blob)
+    kept = [x for x in blobs if x.area <= scfg.blink_max_blob]
+    info = dict(n_raw=len(blobs), n_kept=len(kept),
+                areas=[x.area for x in kept],
+                noise_px=int(m_null.sum()))
+    if not kept:
+        return None, info
     # each finger sweep is its own component: area-weighted mean = gripper center
-    weights = np.array([b.area for b in blobs], float)
-    centers = np.stack([b.center for b in blobs])
-    return (weights @ centers) / weights.sum()
+    weights = np.array([x.area for x in kept], float)
+    centers = np.stack([x.center for x in kept])
+    return (weights @ centers) / weights.sum(), info
+
+
+def blink_locate(rig, scfg):
+    """blink_measure without the diagnostics -- the control pipeline's view."""
+    px, _ = blink_measure(rig, scfg)
+    return px
 
 
 def filter_by_background(det_blobs, frame, background, thresh=28, min_area=80,

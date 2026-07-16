@@ -112,6 +112,51 @@ def test_diff_mask_ignores_global_exposure_shift():
         "blob must be at the moved patch, not the frame center"
 
 
+def test_blink_sync_detection_rejects_noise_and_passersby():
+    """Reproduces the real-camera failure: Test Blink reported the gripper at
+    a different random place every time (13-33 scattered diff blobs from
+    compression shimmer + a person moving in frame). blink_measure's
+    synchronous detection must find the one region that oscillates WITH the
+    gripper command and ignore everything else."""
+    from perception import blink_measure
+    from config import ServoConfig
+
+    rng = np.random.default_rng(4)
+    H, W = 480, 640
+    base = rng.integers(60, 190, (H, W, 3)).astype(np.uint8)
+    scfg = ServoConfig()
+
+    class NoisyRig:
+        """Gripper = small patch at (320,240) that shifts with g; plus
+        per-frame speckle noise blobs (compression shimmer) and a 'person'
+        drifting right regardless of commands."""
+        def __init__(self):
+            self.g = 1.0
+            self.t = 0
+        def set_gripper(self, g):
+            self.g = g
+        def read(self):
+            self.t += 1
+            f = base.copy()
+            # person: 60x40 block moving continuously with time
+            x = 40 + self.t * 12
+            f[80:140, x:x + 40] = 30
+            # compression shimmer: 25 random small speckles, new every frame
+            r = np.random.default_rng(self.t)
+            for _ in range(25):
+                y, xx = int(r.integers(0, H - 8)), int(r.integers(0, W - 8))
+                f[y:y + 7, xx:xx + 7] = r.integers(0, 255)
+            # gripper fingers: 24x10 bar whose x-position tracks the command
+            gx = int(320 + (1.0 - self.g) * 30)
+            f[230:254, gx:gx + 10] = 255
+            return f
+
+    px, info = blink_measure(NoisyRig(), scfg)
+    assert px is not None, f"sync detection found nothing: {info}"
+    err = np.linalg.norm(px - [325, 242])
+    assert err < 30, f"gripper localized {err:.0f}px off: {px} vs ~(325,242); {info}"
+
+
 def test_filter_by_background_drops_arm_detection():
     """A learned detector will happily box the robot arm itself (seen live
     with nanodet in the pybullet GUI: its biggest detection was the arm, and
@@ -139,6 +184,7 @@ if __name__ == "__main__":
                test_blink_locate, test_locate_by_diff_tracks_carried_object,
                test_locate_by_diff_rejects_distant_distractor,
                test_diff_mask_ignores_global_exposure_shift,
+               test_blink_sync_detection_rejects_noise_and_passersby,
                test_filter_by_background_drops_arm_detection]:
         fn()
         print(f"ok {fn.__name__}")
