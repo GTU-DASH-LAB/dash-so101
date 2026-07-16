@@ -164,13 +164,19 @@ class CameraNanodetApp:
                                      {COCO_CLASSES.index(c) for c in self._classes()})
             self.detector.score_thresh = self.score_var.get()
             t0 = time.time()
-            blobs = self.detector(frame)
+            dets = self.detector.detect_labeled(frame)
             infer_ms = (time.time() - t0) * 1000
-            n_det = len(blobs)
-            for b in blobs:
-                x, y, w, h = b.bbox
+            n_det = len(dets)
+            for d in dets:
+                x, y, w, h = d["bbox"]
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 220, 0), 2)
-                cv2.circle(frame, tuple(int(v) for v in b.center), 4, (0, 0, 255), -1)
+                cv2.circle(frame, tuple(int(v) for v in d["center"]), 4, (0, 0, 255), -1)
+                label = f'{d["class_name"]} {d["score"]:.2f}'
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                ly = max(y, th + 4)
+                cv2.rectangle(frame, (x, ly - th - 4), (x + tw + 4, ly), (0, 220, 0), -1)
+                cv2.putText(frame, label, (x + 2, ly - 3), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
         now = time.time()
         fps = 1.0 / max(now - self._last_t, 1e-6)

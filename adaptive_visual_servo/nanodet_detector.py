@@ -103,7 +103,12 @@ class NanodetDetector:
     `detector` plug point."""
 
     def __init__(self, class_names=TABLETOP_CLASSES, score_thresh=0.35, nms_thresh=0.5):
-        self.session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+        so = ort.SessionOptions()
+        so.log_severity_level = 3  # ERROR only -- this export's initializers-as-
+                                    # graph-inputs quirk otherwise logs a WARNING
+                                    # per weight tensor on every session load
+        self.session = ort.InferenceSession(MODEL_PATH, sess_options=so,
+                                            providers=["CPUExecutionProvider"])
         self.allowed = (None if class_names is None
                         else {COCO_CLASSES.index(c) for c in class_names})
         self.score_thresh, self.nms_thresh = score_thresh, nms_thresh
@@ -118,17 +123,27 @@ class NanodetDetector:
         x = ((canvas.astype(np.float32) - MEAN) / STD).transpose(2, 0, 1)[None]
         return x.astype(np.float32), scale
 
-    def __call__(self, frame):
+    def _detect(self, frame):
+        """Raw detections in original image coords, allowlist-filtered:
+        [(x0, y0, x1, y1, score, class_id), ...], largest box first."""
         x, scale = self._preprocess(frame)
         (output,) = self.session.run(None, {"data": x})
         dets = decode_nanodet_output(output[0], score_thresh=self.score_thresh,
                                      nms_thresh=self.nms_thresh)
-        h, w = frame.shape[:2]
-        blobs = []
+        out = []
         for x0, y0, x1, y1, score, cid in dets:
             if self.allowed is not None and cid not in self.allowed:
                 continue
-            x0, y0, x1, y1 = x0 / scale, y0 / scale, x1 / scale, y1 / scale
+            out.append((x0 / scale, y0 / scale, x1 / scale, y1 / scale, score, cid))
+        out.sort(key=lambda d: -(d[2] - d[0]) * (d[3] - d[1]))
+        return out
+
+    def __call__(self, frame):
+        """frame(BGR) -> list[Blob], matching control.run_episode's
+        `detector` plug point."""
+        h, w = frame.shape[:2]
+        blobs = []
+        for x0, y0, x1, y1, score, cid in self._detect(frame):
             cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
             # mean BGR of the box interior, so pick_by_hue ("pick the red one")
             # works the same as with the bg-sub detector's blobs
@@ -138,5 +153,15 @@ class NanodetDetector:
             blobs.append(Blob(np.array([cx, cy]), int((x1 - x0) * (y1 - y0)),
                               (int(x0), int(y0), int(x1 - x0), int(y1 - y0)),
                               color))
-        blobs.sort(key=lambda b: -b.area)
         return blobs
+
+    def detect_labeled(self, frame):
+        """Like __call__ but keeps score/class_name -- for anything that
+        wants to display what nanodet actually saw (camera_nanodet_tester.py),
+        not just the bare Blob the control pipeline consumes."""
+        out = []
+        for x0, y0, x1, y1, score, cid in self._detect(frame):
+            out.append(dict(bbox=(int(x0), int(y0), int(x1 - x0), int(y1 - y0)),
+                            center=np.array([(x0 + x1) / 2, (y0 + y1) / 2]),
+                            score=score, class_id=cid, class_name=COCO_CLASSES[cid]))
+        return out
