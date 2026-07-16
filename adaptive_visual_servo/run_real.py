@@ -72,6 +72,12 @@ class SO101Rig:
         pos = self.robot.bus.sync_read("Present_Position", list(self.cfg.joints))
         return np.radians([pos[j] for j in self.cfg.joints])
 
+    def _settle(self, moved, full_range):
+        """Settle time proportional to how far this command actually moved,
+        not a flat worst-case wait -- most visual-servo steps are tiny."""
+        frac = min(abs(moved) / full_range, 1.0) if full_range else 0.0
+        time.sleep(self.cfg.settle_floor_s + frac * self.cfg.settle_full_move_s)
+
     def set_q(self, q):
         c = self.cfg
         q = np.clip(q, np.radians(c.q_min_deg), np.radians(c.q_max_deg))
@@ -80,14 +86,16 @@ class SO101Rig:
         deg = deg_before + step
         action = {f"{j}.pos": float(v) for j, v in zip(c.joints, deg)}
         self.robot.send_action(action)
-        time.sleep(c.settle_s)
+        self._settle(np.max(np.abs(step)), c.max_step_deg)
 
     def set_gripper(self, g):
-        self._g = float(np.clip(g, 0.0, 1.0))
         c = self.cfg
+        g_before = self._g
+        self._g = float(np.clip(g, 0.0, 1.0))
+        pos_before = c.gripper_closed_pos + g_before * (c.gripper_open_pos - c.gripper_closed_pos)
         pos = c.gripper_closed_pos + self._g * (c.gripper_open_pos - c.gripper_closed_pos)
         self.robot.send_action({"gripper.pos": float(pos)})
-        time.sleep(c.settle_s)
+        self._settle(pos - pos_before, abs(c.gripper_open_pos - c.gripper_closed_pos))
 
     def gripper_contact(self):
         load = abs(self.robot.bus.read("Present_Load", "gripper"))
@@ -98,6 +106,26 @@ class SO101Rig:
 
     def capture_background(self):
         return self.read()
+
+
+class _FrameTap:
+    """Wraps a rig so every rig.read() call also caches the frame in
+    .last_frame -- lets the UI's live preview show the ACTUAL frames the
+    controller is reading during a background-threaded episode, without the
+    UI thread ever touching the camera itself (that would race the episode
+    thread's own reads). Everything else passes through unchanged."""
+
+    def __init__(self, rig):
+        self._rig = rig
+        self.last_frame = None
+
+    def read(self):
+        frame = self._rig.read()
+        self.last_frame = frame
+        return frame
+
+    def __getattr__(self, name):
+        return getattr(self._rig, name)
 
 
 def calibrate_gripper(rig: SO101Rig):
@@ -185,6 +213,8 @@ class RealUI:
         self.pick_px = None
         self.drop_px = None
         self.last_debug = {}
+        self.episode_running = False
+        self._episode_result = None
 
         self._build_ui()
         self.refresh_cameras()
@@ -232,10 +262,11 @@ class RealUI:
 
         run = ttk.LabelFrame(self.root, text="Run", padding=8)
         run.pack(fill="x", padx=8, pady=4)
-        ttk.Button(run, text="Capture Background",
-                  command=self.on_capture_background).pack(side="left")
-        ttk.Button(run, text="Run One Episode",
-                  command=self.on_run_episode).pack(side="left", padx=6)
+        self.bg_btn = ttk.Button(run, text="Capture Background",
+                                 command=self.on_capture_background)
+        self.bg_btn.pack(side="left")
+        self.run_btn = ttk.Button(run, text="Run One Episode", command=self.on_run_episode)
+        self.run_btn.pack(side="left", padx=6)
         self.bg_var = tk.StringVar(value="background: not captured")
         ttk.Label(run, textvariable=self.bg_var).pack(side="left", padx=12)
 
@@ -313,7 +344,7 @@ class RealUI:
                       "prompts if this is a new arm id...")
         self.root.update_idletasks()
         try:
-            self.rig = SO101Rig(self.cfg)
+            self.rig = _FrameTap(SO101Rig(self.cfg))
         except Exception as e:  # surfaced to the user, not a crash
             self.log_line(f"Connect failed: {e}")
             return
@@ -362,6 +393,8 @@ class RealUI:
 
     # ---------- run ----------
     def on_run_episode(self):
+        if self.episode_running:
+            return  # button is disabled during a run, but guard anyway
         if self.rig is None:
             self.log_line("Connect the arm first.")
             return
@@ -384,24 +417,59 @@ class RealUI:
 
         scfg = ServoConfig(tol_coarse_px=18.0, tol_fine_px=12.0, reject_px=45.0,
                           measure_every=3)
-        rng = np.random.default_rng(0)
-        self.log_line("Running episode -- window will be unresponsive while the arm moves...")
-        self.root.update_idletasks()
-        res = run_episode(
-            self.rig, self.model, scfg, self.background, rng,
-            detector=detector, J=self.J,
-            manual_target_px=None if self.nanodet_var.get() else self.pick_px,
-            manual_pad_px=self.drop_px,
-            debug=lambda ev: self.last_debug.update(ev))
+        if not hasattr(self, "rng"):
+            self.rng = np.random.default_rng(0)  # persists across episodes, not reseeded each run
+        manual_target = None if self.nanodet_var.get() else self.pick_px
+        manual_pad = self.drop_px
+
+        # Run on a background thread so the UI (and the live preview, fed by
+        # the same frames the controller itself reads via _FrameTap) stays
+        # responsive while the arm moves. Only this thread ever calls rig
+        # methods during the run -- Connect/Preview/Capture/Run are disabled
+        # below so nothing else can touch the camera or motors concurrently.
+        self.episode_running = True
+        self._episode_result = None
+        for b in (self.connect_btn, self.preview_btn, self.bg_btn, self.run_btn):
+            b.config(state="disabled")
+        self.log_line("Running episode (window stays responsive; video keeps updating)...")
+
+        def worker():
+            try:
+                res = run_episode(
+                    self.rig, self.model, scfg, self.background, self.rng,
+                    detector=detector, J=self.J,
+                    manual_target_px=manual_target, manual_pad_px=manual_pad,
+                    debug=lambda ev: self.last_debug.update(ev))
+            except Exception as e:  # surfaced in the log, not a crash
+                res = dict(ok=False, reason=f"exception: {e}", J=self.J)
+            self._episode_result = res
+
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(150, self._poll_episode)
+
+    def _poll_episode(self):
+        if self._episode_result is None:
+            self.root.after(150, self._poll_episode)
+            return
+        res = self._episode_result
         self.J = res["J"]
         self.log_line(f"Result: {res['reason']!r}")
-        self._update_frame()
+        self.episode_running = False
+        for b in (self.connect_btn, self.preview_btn, self.bg_btn, self.run_btn):
+            b.config(state="normal")
 
     # ---------- live preview ----------
     def _update_frame(self):
         from PIL import Image, ImageTk
         import cv2
-        if self.rig is not None:
+        if self.rig is not None and self.episode_running:
+            # an episode is running on a background thread and already
+            # calling rig.read() itself -- show its actual frames (cached by
+            # _FrameTap) instead of reading the camera again from this
+            # thread too, which would race the episode thread
+            frame = self.rig.last_frame
+        elif self.rig is not None:
             frame = self.rig.read()  # rig.read() returns the frame directly
         elif self.preview_cap is not None:
             ok, frame = self.preview_cap.read()  # raw cv2.VideoCapture: (ok, frame)
@@ -439,6 +507,14 @@ class RealUI:
         self.root.after(30, self._update_frame)
 
     def on_close(self):
+        if self.episode_running:
+            from tkinter import messagebox
+            messagebox.showwarning(
+                "Episode running",
+                "An episode is still running on the arm -- wait for it to "
+                "finish before closing (closing now would disconnect the "
+                "hardware while it's still moving).")
+            return
         if self.preview_cap is not None:
             self.preview_cap.release()
         if self.rig is not None:

@@ -158,8 +158,15 @@ loop changes, only how the target pixel and drop pixel are chosen:
   color-marked pad with any clicked spot; leave it unset to keep using the pad. Points persist across
   episodes until you click new ones or hit "Clear points" — click again anytime to update either one.
 - **Run**: Capture Background once (workspace clear), then Run One Episode reuses the babbled
-  Jacobian across runs like the CLI does. The window is unresponsive while the arm actually moves —
-  deliberate, motor commands only ever come from one thread, never racing the live-preview loop.
+  Jacobian across runs like the CLI does. Runs on a background thread so the window stays responsive
+  and the video keeps updating live — showing the *actual* frames the controller itself reads
+  (`_FrameTap` caches every `rig.read()`), not a second independent camera poll. Connect/Preview/
+  Capture Background/Run are disabled for the run's duration: motor commands and camera reads still
+  only ever come from one thread at a time, they just aren't the UI thread anymore.
+- Settle time after each real joint/gripper command scales with how far it actually moved
+  (`RealConfig.settle_floor_s`/`settle_full_move_s`) instead of a flat wait — most visual-servo steps
+  are tiny (clamped by `max_step_deg`/`dq_max`) and don't need a full gripper-sweep's worth of pause.
+  Starting guess, tune against your arm's actual STS3215 speed.
 
 New capability this required in `control.run_episode`: `manual_target_px`/`manual_pad_px` skip
 detection entirely and servo straight to a given pixel — still the full adaptive control loop

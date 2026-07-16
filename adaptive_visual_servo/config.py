@@ -100,7 +100,15 @@ class RealConfig:
     camera_index: int = 0
     joints: tuple = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
     max_step_deg: float = 4.0       # per-command clamp, same spirit as max_relative_target=5
-    settle_s: float = 0.35
+    # settle time scales with how far the command actually moved: most visual-
+    # servo steps are tiny (clamped by max_step_deg/dq_max) and don't need a
+    # full gripper-sweep's worth of wait. floor = minimum for any move (comms
+    # round-trip + a little settle); full_move_s = extra added at the biggest
+    # possible single-command move (max_step_deg for arm joints, full open<->
+    # closed range for the gripper). Starting guess -- tune against your
+    # arm's actual STS3215 speed (this project has never run on real hardware).
+    settle_floor_s: float = 0.05
+    settle_full_move_s: float = 0.3
     gripper_open_pos: float = 50.0  # gripper joint value at g=1.0 (calibrate!)
     gripper_closed_pos: float = 5.0
     load_threshold: int = 300       # |Present_Load| indicating contact (calibrate!)
