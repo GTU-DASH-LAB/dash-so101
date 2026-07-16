@@ -31,7 +31,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from nanodet_detector import COCO_CLASSES, TABLETOP_CLASSES, NanodetDetector
 
 PROBE_RANGE = 10
-DISPLAY_W, DISPLAY_H = 640, 480
+MAX_DISPLAY_W, MAX_DISPLAY_H = 480, 360  # scale down for display only; never upscale
+
+
+def fit_to_display(frame, max_w=MAX_DISPLAY_W, max_h=MAX_DISPLAY_H):
+    h, w = frame.shape[:2]
+    scale = min(max_w / w, max_h / h, 1.0)
+    if scale >= 0.999:
+        return frame
+    return cv2.resize(frame, (int(w * scale), int(h * scale)))
 
 
 def probe_cameras(max_index=PROBE_RANGE):
@@ -189,7 +197,7 @@ class CameraNanodetApp:
         else:
             self.status_var.set(f"Live -- {w}x{h} @ {fps:.1f} FPS")
 
-        disp = cv2.resize(frame, (DISPLAY_W, DISPLAY_H)) if (w, h) != (DISPLAY_W, DISPLAY_H) else frame
+        disp = fit_to_display(frame)
         rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
         self._imgtk = ImageTk.PhotoImage(image=Image.fromarray(rgb))
         self.video_label.config(image=self._imgtk)

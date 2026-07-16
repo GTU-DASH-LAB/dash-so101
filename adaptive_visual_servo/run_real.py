@@ -40,6 +40,8 @@ from control import run_episode
 from lerobot_ik import PlacoModel
 from nanodet_detector import TABLETOP_CLASSES, NanodetDetector
 
+MAX_DISPLAY_W, MAX_DISPLAY_H = 480, 360  # scale the UI's video panel down for display only
+
 
 class SO101Rig:
     """rig interface in radians / [0,1] / BGR, converted to the bus's native
@@ -421,8 +423,15 @@ class RealUI:
         s = self.last_debug.get("s")
         if s is not None:
             cv2.drawMarker(img, tuple(np.int32(s)), (0, 220, 255), cv2.MARKER_CROSS, 14, 2)
+        # markers are drawn in raw-frame coordinates above; resize for display
+        # AFTER drawing, and record the resized size so _on_click's raw_w/disp_w
+        # math maps clicks back to raw-frame pixels correctly
         h, w = img.shape[:2]
-        self.disp_size = (w, h)
+        scale = min(MAX_DISPLAY_W / w, MAX_DISPLAY_H / h, 1.0)
+        if scale < 0.999:
+            img = cv2.resize(img, (int(w * scale), int(h * scale)))
+        dh, dw = img.shape[:2]
+        self.disp_size = (dw, dh)
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         self._imgtk = ImageTk.PhotoImage(image=Image.fromarray(rgb))
         self.video_label.config(image=self._imgtk)
