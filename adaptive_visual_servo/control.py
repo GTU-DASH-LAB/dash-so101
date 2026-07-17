@@ -127,6 +127,47 @@ def broyden_update(J, dq, ds, beta=0.5, min_dq=0.004, adaptive=False):
     return J + adaptive_beta * np.outer(ds - J @ dq, dq) / nq
 
 
+def make_null_fn(scfg, q_vis_ref):
+    """Secondary-objective joint velocity for servo_to's null-space term:
+
+      dq_null = joint-limit repulsion (potential field) + wrist posture
+                attraction toward the last marker-visible pose
+
+    servo_to projects it through (I - J+J), so it never disturbs the image
+    task to first order. `q_vis_ref` is a dict whose "q" run_episode updates
+    on every real marker sighting -- pulling the wrist back toward a pose
+    where the marker demonstrably faced the camera is what keeps it visible
+    without ever commanding the EE pixel off target.
+
+    Limit potential: U = sum over joints of max(0, |u|-dz)^2 with
+    u = (q-mid)/half in [-1, 1]; dq = -k_lim * dU/dq stays exactly zero
+    inside the deadzone so mid-range motion is never biased.
+    Returns None when neither objective is configured."""
+    lim_on = getattr(scfg, "q_lo", None) is not None and scfg.null_k_lim > 0
+    vis_on = scfg.null_k_vis > 0
+    if not lim_on and not vis_on:
+        return None
+    if lim_on:
+        lo, hi = np.asarray(scfg.q_lo, float), np.asarray(scfg.q_hi, float)
+        mid, half = 0.5 * (lo + hi), 0.5 * (hi - lo)
+    dz = scfg.null_deadzone
+
+    def null_fn(q):
+        dq = np.zeros_like(q)
+        if lim_on:
+            u = (q - mid) / half                     # -1 at q_lo .. +1 at q_hi
+            over = (np.abs(u) - dz) / (1.0 - dz)
+            push = np.where(over > 0, over ** 2, 0.0)
+            dq -= scfg.null_k_lim * np.sign(u) * push
+        q_vis = q_vis_ref.get("q")
+        if vis_on and q_vis is not None and len(q) > max(scfg.wrist_joints):
+            for j in scfg.wrist_joints:
+                dq[j] += scfg.null_k_vis * (q_vis[j] - q[j])
+        return dq
+
+    return null_fn
+
+
 def babble(rig, scfg, rng, pair_sink=None):
     """Motor babbling: random-walk joint probes on a leash around the start
     pose; blink-localize the EE before/after each probe; least-squares fit of
@@ -181,7 +222,7 @@ def babble(rig, scfg, rng, pair_sink=None):
 
 
 def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px, shape_dq=None,
-             jac_fn=None, debug=None):
+             jac_fn=None, null_fn=None, debug=None):
     """Closed-loop image servo: drive the EE pixel onto target_px.
 
     `locate(predicted_px) -> px | None` measures the EE (blink while the hand
@@ -201,6 +242,10 @@ def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px, shape_dq=None,
     `jac_fn(q) -> 2xN`: fused-tracking mode — the image Jacobian comes from
     the calibrated camera+FK model at every step (fresh, pose-exact), so
     Broyden updating is skipped entirely.
+
+    `null_fn(q) -> dq_null` (see make_null_fn): secondary objectives (joint-
+    limit repulsion, marker-visibility posture) added through the null-space
+    projector: dq = J+(lam*e) + (I - J+J) dq_null.
     Returns (ok, J, s_ee).
     """
     target = np.asarray(target_px, float)
@@ -225,10 +270,18 @@ def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px, shape_dq=None,
         if getattr(scfg, "stiction_comp", False):
             # Smoothly boost lam from scfg.lam (large error) towards 0.95 (small error) to overcome stiction
             adaptive_lam = float(scfg.lam + (0.95 - scfg.lam) * np.exp(-err_norm / 15.0))
+            # tracking-rate term: measured progress has stalled (stiction /
+            # under-modeled J eating the command) -> push proportionally harder
+            adaptive_lam = min(0.95, adaptive_lam * (1.0 + 0.15 * stall))
         else:
             adaptive_lam = scfg.lam
-        dq = damped_pinv(J, scfg.damping) @ (adaptive_lam * e)
-        dq = np.clip(dq, -scfg.dq_max, scfg.dq_max)
+        Jp = damped_pinv(J, scfg.damping)
+        dq = np.clip(Jp @ (adaptive_lam * e), -scfg.dq_max, scfg.dq_max)
+        if null_fn is not None:
+            # secondary objectives ride the null space: zero first-order pixel
+            # motion, so the image task never sees them
+            dq_ns = (np.eye(len(q_before)) - Jp @ J) @ null_fn(q_before)
+            dq = np.clip(dq + dq_ns, -scfg.dq_max, scfg.dq_max)
         if shape_dq is not None:
             dq = np.clip(dq + shape_dq(q_before), -0.2, 0.2)
         rig.set_q(q_before + dq)
@@ -340,6 +393,17 @@ def run_episode(rig, model, scfg, background, rng,
     debug = debug or (lambda ev: None)
     fused = tracker if (tracker is not None and scfg.fuse) else None
 
+    # marker-visibility reference for the null-space controller: updated at
+    # every REAL marker sighting, so the wrist is continuously pulled back
+    # toward a camera-facing pose instead of drifting until a ~30s scan
+    q_vis = {"q": None}
+
+    def note_marker_seen(q_now=None):
+        if getattr(scfg, "use_aruco", False):
+            q_vis["q"] = (rig.get_q() if q_now is None else q_now).copy()
+
+    null_fn = make_null_fn(scfg, q_vis)
+
     def fail(reason):
         debug(dict(msg=f"[episode] FAILED: {reason} -- raising arm and returning home."))
         rig.set_gripper(1.0)
@@ -447,6 +511,7 @@ def run_episode(rig, model, scfg, background, rng,
                 if kf_update is not None:
                     kf_update(q_now, m)
                 c[:] = m - fused.track_px(q_now)  # residual on the UPDATED model
+                note_marker_seen(q_now)
             return loc_coarse(None)
 
         def anchor_fine():
@@ -473,6 +538,8 @@ def run_episode(rig, model, scfg, background, rng,
             fine for the coarse traverse, the ~40px jaw offset doesn't matter
             until we're lining up the grasp."""
             r = locate_gripper(rig, scfg, predicted_px=pred)
+            if r is not None:
+                note_marker_seen()
             debug(dict(s=r))
             return r
 
@@ -511,16 +578,16 @@ def run_episode(rig, model, scfg, background, rng,
         nonlocal J, s
         debug(dict(msg=f"[servo_recover] Phase 1: Servoing to target with current Jacobian..."))
         ok, J, s = servo_to(rig, scfg, J, s, target, loc, tol, shape_dq=hold,
-                            jac_fn=jac_fn, debug=debug)
+                            jac_fn=jac_fn, null_fn=null_fn, debug=debug)
         if ok:
             return True
-            
+
         debug(dict(msg=f"[servo_recover] Phase 1 failed. Phase 2: Re-anchoring position..."))
         s2 = loc(None)
         if s2 is not None:
             s = s2
         ok, J, s = servo_to(rig, scfg, J, s, target, loc, tol, shape_dq=hold,
-                            jac_fn=jac_fn, debug=debug)
+                            jac_fn=jac_fn, null_fn=null_fn, debug=debug)
         if ok:
             return True
             
@@ -542,7 +609,7 @@ def run_episode(rig, model, scfg, background, rng,
         if s2 is not None:
             s = s2
         ok, J, s = servo_to(rig, scfg, J, s, target, loc, tol, shape_dq=hold,
-                            jac_fn=jac_fn, debug=debug)
+                            jac_fn=jac_fn, null_fn=null_fn, debug=debug)
         return ok
 
     # ---- approach + descend + grasp, with retries ----
@@ -626,8 +693,10 @@ def run_episode(rig, model, scfg, background, rng,
             if getattr(scfg, "use_aruco", False):
                 m = locate_by_aruco(rig.read(), scfg.aruco_id, predicted_px=pred,
                                    max_dist=scfg.gripper_search_radius)
-                if m is not None and kf_update is not None:
-                    kf_update(q_now, m)  # marker semantics: safe to refine offset
+                if m is not None:
+                    if kf_update is not None:
+                        kf_update(q_now, m)  # marker semantics: safe to refine offset
+                    note_marker_seen(q_now)
             else:
                 m = locate_by_diff(rig.read(), background, pred, scfg.track_roi,
                                    scfg.bg_thresh, scfg.obj_min_area, scfg.track_max_jump)
@@ -660,6 +729,8 @@ def run_episode(rig, model, scfg, background, rng,
             if getattr(scfg, "use_aruco", False):
                 r = locate_by_aruco(rig.read(), scfg.aruco_id, predicted_px=pred,
                                    max_dist=scfg.gripper_search_radius)
+                if r is not None:
+                    note_marker_seen()
             else:
                 r = locate_by_diff(rig.read(), background, pred, scfg.track_roi,
                                    scfg.bg_thresh, scfg.obj_min_area, scfg.track_max_jump)
@@ -674,14 +745,16 @@ def run_episode(rig, model, scfg, background, rng,
     debug(dict(target=pad_px))  # carrying: the goal is the pad now
     debug(dict(msg="[episode] Transporting to drop target..."))
     ok, J, s = servo_to(rig, scfg, J, s, pad_px, tr, scfg.tol_coarse_px,
-                        shape_dq=z_hold(scfg.lift_z), jac_fn=jac_fn, debug=debug)
+                        shape_dq=z_hold(scfg.lift_z), jac_fn=jac_fn,
+                        null_fn=null_fn, debug=debug)
     if not ok:
         return fail("transport servo failed")
     # lower over the pad and re-servo: kills the remaining parallax offset
     debug(dict(msg=f"[episode] Lowering to z={scfg.release_z:.3f}m and re-servoing..."))
     nominal_z_to(rig, model, scfg.release_z, scfg, after_step=track_step)
     ok, J, s = servo_to(rig, scfg, J, s, pad_px, tr, scfg.tol_coarse_px,
-                        shape_dq=z_hold(scfg.release_z), jac_fn=jac_fn, debug=debug)
+                        shape_dq=z_hold(scfg.release_z), jac_fn=jac_fn,
+                        null_fn=null_fn, debug=debug)
     debug(dict(msg="[episode] Releasing and homing..."))
     rig.set_gripper(1.0)
     nominal_z_to(rig, model, scfg.lift_z, scfg)

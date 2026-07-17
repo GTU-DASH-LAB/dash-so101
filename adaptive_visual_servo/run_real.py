@@ -33,6 +33,7 @@ import sys
 import time
 
 import numpy as np
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import RealConfig, ServoConfig
@@ -93,11 +94,29 @@ class SO101Rig:
         c = self.cfg
         q = np.clip(q, np.radians(c.q_min_deg), np.radians(c.q_max_deg))
         deg_before = np.degrees(self.get_q())
-        step = np.clip(np.degrees(q) - deg_before, -c.max_step_deg, c.max_step_deg)
-        deg = deg_before + step
+        target_deg = np.degrees(q)
+        max_diff = np.max(np.abs(target_deg - deg_before))
+        
+        # Smoothly interpolate large movements (e.g. initial approaches or transitions)
+        if max_diff > 1.5:
+            # 1.0 degree per step max, run at ~30Hz
+            steps = int(max(5, min(45, max_diff / 1.0)))
+            for a in np.linspace(1.0/steps, 1.0, steps):
+                interp_deg = deg_before + a * (target_deg - deg_before)
+                action = {f"{j}.pos": float(v) for j, v in zip(c.joints, interp_deg)}
+                self.robot.send_action(action)
+                time.sleep(0.033)
+        else:
+            action = {f"{j}.pos": float(v) for j, v in zip(c.joints, target_deg)}
+            self.robot.send_action(action)
+            self._settle(max_diff, c.max_step_deg)
+
+    def set_q_raw(self, q):
+        c = self.cfg
+        q = np.clip(q, np.radians(c.q_min_deg), np.radians(c.q_max_deg))
+        deg = np.degrees(q)
         action = {f"{j}.pos": float(v) for j, v in zip(c.joints, deg)}
         self.robot.send_action(action)
-        self._settle(np.max(np.abs(step)), c.max_step_deg)
 
     def set_gripper(self, g):
         c = self.cfg
@@ -138,19 +157,33 @@ class SO101Rig:
 
 
 class _FrameTap:
-    """Wraps a rig so every rig.read() call also caches the frame in
-    .last_frame -- lets the UI's live preview show the ACTUAL frames the
-    controller is reading during a background-threaded episode, without the
-    UI thread ever touching the camera itself (that would race the episode
-    thread's own reads). Everything else passes through unchanged."""
+    """Wraps a rig so only the streaming thread reads the camera.
+    The controller thread blocks on a condition variable until a fresh
+    frame is available. This avoids multi-threaded camera access races
+    and keeps the video feed updated at 30Hz even during episodes.
+    """
 
     def __init__(self, rig):
         self._rig = rig
         self.last_frame = None
+        self.cond = threading.Condition()
+        self.new_frame_flag = False
 
     def read(self):
+        # Wait for the streaming thread to read a new frame
+        with self.cond:
+            self.new_frame_flag = False
+            # Wait up to 250ms for a fresh frame; if timeout, return latest cached
+            self.cond.wait(timeout=0.25)
+            return self.last_frame
+
+    def produce_frame(self):
+        # Called by the UI streaming thread at 30Hz to grab a fresh frame
         frame = self._rig.read()
-        self.last_frame = frame
+        with self.cond:
+            self.last_frame = frame
+            self.new_frame_flag = True
+            self.cond.notify_all()
         return frame
 
     def __getattr__(self, name):
@@ -220,7 +253,7 @@ class RealUI:
     preview loop.
     """
 
-    def __init__(self, root):
+    def __init__(self, root, cfg=None):
         import tkinter as tk
         from tkinter import ttk
         self.tk, self.ttk = tk, ttk
@@ -228,7 +261,7 @@ class RealUI:
         root.title("SO-101 adaptive visual servo")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        self.cfg = RealConfig()
+        self.cfg = cfg if cfg is not None else RealConfig()
         self.rig = None
         self.model = None
         self.detector = None
@@ -289,6 +322,93 @@ class RealUI:
         ttk.Label(det, textvariable=self.points_var).grid(
             row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
+        # Speed & Learning Tuning
+        tuning = ttk.LabelFrame(self.root, text="Speed & Learning Tuning", padding=8)
+        tuning.pack(fill="x", padx=8, pady=4)
+        
+        ttk.Label(tuning, text="Arm Speed:").grid(row=0, column=0, sticky="w")
+        self.speed_var = tk.DoubleVar(value=1.0)
+        self.speed_slider = tk.Scale(tuning, from_=1.0, to=4.0, resolution=0.5, orient="horizontal",
+                                     variable=self.speed_var, command=self._on_speed_change, showvalue=False)
+        self.speed_slider.grid(row=0, column=1, padx=4, sticky="ew")
+        self.speed_label = ttk.Label(tuning, text="1.0x (dq_max=0.06rad, max_step=4.0deg)")
+        self.speed_label.grid(row=0, column=2, padx=4, sticky="w")
+        
+        ttk.Label(tuning, text="Babble Probes:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.probes_var = tk.IntVar(value=22)
+        self.probes_slider = tk.Scale(tuning, from_=10, to=30, resolution=1, orient="horizontal",
+                                      variable=self.probes_var, command=self._on_probes_change, showvalue=False)
+        self.probes_slider.grid(row=1, column=1, padx=4, pady=(6, 0), sticky="ew")
+        self.probes_label = ttk.Label(tuning, text="22 probes")
+        self.probes_label.grid(row=1, column=2, padx=4, pady=(6, 0), sticky="w")
+        
+        tuning.grid_columnconfigure(1, weight=1)
+
+        # Gripper Tracking Mode
+        track_frame = ttk.LabelFrame(self.root, text="Gripper Tracking Mode", padding=8)
+        track_frame.pack(fill="x", padx=8, pady=4)
+        
+        self.track_mode_var = tk.StringVar(value="blink")
+        
+        ttk.Radiobutton(track_frame, text="Sync-Blink (Motion Diff)", variable=self.track_mode_var,
+                        value="blink", command=self._on_track_mode_change).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(track_frame, text="HSV Color Marker", variable=self.track_mode_var,
+                        value="marker", command=self._on_track_mode_change).grid(row=0, column=1, sticky="w", padx=12)
+        ttk.Radiobutton(track_frame, text="AruCo Fiducial Marker", variable=self.track_mode_var,
+                        value="aruco", command=self._on_track_mode_change).grid(row=0, column=2, sticky="w")
+        
+        # Sub-frame for HSV Color Marker controls
+        self.hsv_frame = ttk.Frame(track_frame)
+        self.hsv_preview_var = tk.BooleanVar(value=False)
+        self.hsv_preview_cb = ttk.Checkbutton(self.hsv_frame, text="Show Binary Segmentation Mask in Video Feed",
+                                              variable=self.hsv_preview_var)
+        self.hsv_preview_cb.grid(row=0, column=0, columnspan=3, sticky="w", pady=(4, 6))
+
+        # Hue slider
+        ttk.Label(self.hsv_frame, text="Hue:").grid(row=1, column=0, sticky="w")
+        self.hue_var = tk.IntVar(value=self.cfg.gripper_marker_hue if self.cfg.gripper_marker_hue is not None else 60)
+        self.hue_slider = tk.Scale(self.hsv_frame, from_=0, to=179, orient="horizontal", variable=self.hue_var, showvalue=True)
+        self.hue_slider.grid(row=1, column=1, padx=4, sticky="ew")
+
+        # Tolerance slider
+        ttk.Label(self.hsv_frame, text="Tolerance:").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self.tol_var = tk.IntVar(value=14)
+        self.tol_slider = tk.Scale(self.hsv_frame, from_=1, to=50, orient="horizontal", variable=self.tol_var, showvalue=True)
+        self.tol_slider.grid(row=2, column=1, padx=4, pady=(4, 0), sticky="ew")
+
+        # Saturation slider
+        ttk.Label(self.hsv_frame, text="Min Saturation:").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        self.sat_var = tk.IntVar(value=60)
+        self.sat_slider = tk.Scale(self.hsv_frame, from_=0, to=255, orient="horizontal", variable=self.sat_var, showvalue=True)
+        self.sat_slider.grid(row=3, column=1, padx=4, pady=(4, 0), sticky="ew")
+
+        # Value slider
+        ttk.Label(self.hsv_frame, text="Min Value:").grid(row=4, column=0, sticky="w", pady=(4, 0))
+        self.val_var = tk.IntVar(value=50)
+        self.val_slider = tk.Scale(self.hsv_frame, from_=0, to=255, orient="horizontal", variable=self.val_var, showvalue=True)
+        self.val_slider.grid(row=4, column=1, padx=4, pady=(4, 0), sticky="ew")
+        self.hsv_frame.grid_columnconfigure(1, weight=1)
+
+        # Sub-frame for AruCo controls
+        self.aruco_frame = ttk.Frame(track_frame)
+        ttk.Label(self.aruco_frame, text="Marker ID:").grid(row=0, column=0, sticky="w")
+        self.aruco_id_var = tk.IntVar(value=0)
+        self.aruco_id_spin = ttk.Spinbox(self.aruco_frame, from_=0, to=999, textvariable=self.aruco_id_var, width=6)
+        self.aruco_id_spin.grid(row=0, column=1, padx=6)
+
+        # Kinematic Motion & Shapes
+        shapes_frame = ttk.LabelFrame(self.root, text="Kinematic Motion & Shapes (Inverse Kinematics)", padding=8)
+        shapes_frame.pack(fill="x", padx=8, pady=4)
+        
+        self.reset_btn = ttk.Button(shapes_frame, text="Reset Arm", command=self.on_reset_arm)
+        self.reset_btn.pack(side="left", padx=4)
+        
+        self.circle_btn = ttk.Button(shapes_frame, text="Draw Circle", command=self.on_draw_circle)
+        self.circle_btn.pack(side="left", padx=4)
+        
+        self.heart_btn = ttk.Button(shapes_frame, text="Draw Heart", command=self.on_draw_heart)
+        self.heart_btn.pack(side="left", padx=4)
+
         run = ttk.LabelFrame(self.root, text="Run", padding=8)
         run.pack(fill="x", padx=8, pady=4)
         self.bg_btn = ttk.Button(run, text="Capture Background",
@@ -307,6 +427,221 @@ class RealUI:
 
         self.log = tk.Text(self.root, height=8, width=90, state="disabled")
         self.log.pack(fill="both", padx=8, pady=(0, 8), expand=True)
+        
+        self._on_track_mode_change()
+
+    def _on_track_mode_change(self):
+        mode = self.track_mode_var.get()
+        if mode == "blink":
+            self.hsv_frame.grid_forget()
+            self.aruco_frame.grid_forget()
+            self.hsv_preview_var.set(False)
+            if hasattr(self, "blink_btn"):
+                self.blink_btn.config(text="Test Blink")
+        elif mode == "marker":
+            self.aruco_frame.grid_forget()
+            self.hsv_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+            if hasattr(self, "blink_btn"):
+                self.blink_btn.config(text="Test Marker")
+        elif mode == "aruco":
+            self.hsv_frame.grid_forget()
+            self.hsv_preview_var.set(False)
+            self.aruco_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+            if hasattr(self, "blink_btn"):
+                self.blink_btn.config(text="Test AruCo")
+
+    def _disable_buttons(self):
+        for b in (self.connect_btn, self.preview_btn, self.bg_btn, self.blink_btn,
+                  self.run_btn, self.reset_btn, self.circle_btn, self.heart_btn):
+            if b is not None:
+                b.config(state="disabled")
+
+    def _enable_buttons(self):
+        for b in (self.connect_btn, self.preview_btn, self.bg_btn, self.blink_btn,
+                  self.run_btn, self.reset_btn, self.circle_btn, self.heart_btn):
+            if b is not None:
+                b.config(state="normal")
+
+    def on_reset_arm(self):
+        if self.rig is None or self.episode_running:
+            self.log_line("Connect the arm first (and wait for any running episode).")
+            return
+        if not hasattr(self, "home_q") or self.home_q is None:
+            self.log_line("Home position not captured (should be saved on connection).")
+            return
+        self.log_line("Resetting arm to starting home pose...")
+        
+        def reset_worker():
+            try:
+                self.episode_running = True
+                self._disable_buttons()
+                q = self.rig.get_q()
+                for a in np.linspace(0.2, 1.0, 15):
+                    self.rig.set_q(q + a * (self.home_q - q))
+                    time.sleep(0.08)
+                self.log_line("Reset complete.")
+            except Exception as e:
+                self.log_line(f"Reset failed: {e}")
+            finally:
+                self.episode_running = False
+                self._enable_buttons()
+                
+        import threading
+        threading.Thread(target=reset_worker, daemon=True).start()
+
+    def on_draw_circle(self):
+        if self.rig is None or self.episode_running:
+            self.log_line("Connect the arm first (and wait for any running episode).")
+            return
+        self.log_line("Moving to shape starting coordinate in front of the arm...")
+        
+        def circle_worker():
+            try:
+                self.episode_running = True
+                self._disable_buttons()
+                
+                # 1. Define center pose: a safe, comfortable upright pose high in the air
+                # Keep Joint 1 pan matching self.home_q[0] so it points forward, but set Joint 2 (lift)=30 deg, Joint 3 (elbow)=-30 deg, Joint 4=0 deg
+                q_L = np.zeros(5)
+                q_L[0] = self.home_q[0]
+                q_L[1] = np.radians(30.0)
+                q_L[2] = np.radians(-30.0)
+                q_L[3] = 0.0
+                q_L[4] = 0.0
+                xyz_L = self.model.ee(q_L)
+                theta = q_L[0]
+                
+                # Perpendicular horizontal direction in vertical plane facing the arm (YZ-like plane)
+                v = np.array([-np.sin(theta), np.cos(theta), 0.0])
+                # Vertical direction
+                w = np.array([0.0, 0.0, 1.0])
+                
+                R = 0.1  # 4 cm radius
+                
+                # 2. Move smoothly from current pose to start point of the circle (t = 0)
+                xyz0 = xyz_L + R * v
+                q_start = self.rig.get_q()
+                q0 = self.model.solve_ik_xyz(q_start, xyz0, orientation_weight=0.0)
+                
+                self.log_line("Interpolating to circle starting coordinate...")
+                for a in np.linspace(0.0, 1.0, 40):
+                    self.rig.set_q_raw(q_start + a * (q0 - q_start))
+                    time.sleep(0.025)
+                time.sleep(0.2)
+                
+                # 3. Trace the circle in the vertical space facing the robot
+                self.log_line("Tracing circle...")
+                steps = 3*60
+                t_arr = np.linspace(0, 6 * np.pi, steps)
+                q_curr = self.rig.get_q()
+                for t in t_arr:
+                    xyz_t = xyz_L + R * np.cos(t) * v + R * np.sin(t) * w
+                    q_next = self.model.solve_ik_xyz(q_curr, xyz_t, orientation_weight=0.0)
+                    self.rig.set_q_raw(q_next)
+                    q_curr = q_next
+                    time.sleep(0.025)
+                
+                # 4. Return smoothly to home
+                self.log_line("Returning to home pose...")
+                q_end = self.rig.get_q()
+                for a in np.linspace(0.0, 1.0, 45):
+                    self.rig.set_q_raw(q_end + a * (self.home_q - q_end))
+                    time.sleep(0.025)
+                    
+                self.log_line("Circle drawing complete.")
+            except Exception as e:
+                self.log_line(f"Drawing failed: {e}")
+            finally:
+                self.episode_running = False
+                self._enable_buttons()
+                
+        import threading
+        threading.Thread(target=circle_worker, daemon=True).start()
+
+    def on_draw_heart(self):
+        if self.rig is None or self.episode_running:
+            self.log_line("Connect the arm first (and wait for any running episode).")
+            return
+        self.log_line("Moving to shape starting coordinate in front of the arm...")
+        
+        def heart_worker():
+            try:
+                self.episode_running = True
+                self._disable_buttons()
+                
+                # 1. Define center pose: a safe, comfortable upright pose high in the air
+                # Keep Joint 1 pan matching self.home_q[0] so it points forward, but set Joint 2 (lift)=30 deg, Joint 3 (elbow)=-30 deg, Joint 4=0 deg
+                q_L = np.zeros(5)
+                q_L[0] = self.home_q[0]
+                q_L[1] = np.radians(30.0)
+                q_L[2] = np.radians(-30.0)
+                q_L[3] = 0.0
+                q_L[4] = 0.0
+                xyz_L = self.model.ee(q_L)
+                theta = q_L[0]
+                
+                # Perpendicular horizontal direction in vertical plane facing the arm (YZ-like plane)
+                v = np.array([-np.sin(theta), np.cos(theta), 0.0])
+                # Vertical direction
+                w = np.array([0.0, 0.0, 1.0])
+                
+                R = 0.1  # 4 cm radius
+                
+                # 2. Move smoothly from current pose to start point of the circle (t = 0)
+                xyz0 = xyz_L + R * v
+                q_start = self.rig.get_q()
+                q0 = self.model.solve_ik_xyz(q_start, xyz0, orientation_weight=0.0)
+                
+                self.log_line("Interpolating to circle starting coordinate...")
+                for a in np.linspace(0.0, 1.0, 40):
+                    self.rig.set_q_raw(q_start + a * (q0 - q_start))
+                    time.sleep(0.025)
+                time.sleep(0.2)
+                
+                scale_h = 0.1
+                scale_v = 0.1
+                
+                def heart_point(t):
+                    dh = np.sin(t) ** 3
+                    dv = (13 * np.cos(t) - 5 * np.cos(2 * t) - 2 * np.cos(3 * t) - np.cos(4 * t) + 2.5) / 15.0
+                    return xyz_L + scale_h * dh * v + scale_v * dv * w
+                
+                # 3. Trace the heart in the vertical space facing the robot
+                self.log_line("Tracing heart...")
+                steps = 3*60
+                t_arr = np.linspace(0, 6 * np.pi, steps)
+                q_curr = self.rig.get_q()
+                for t in t_arr:
+                    xyz_t = heart_point(t)
+                    q_next = self.model.solve_ik_xyz(q_curr, xyz_t, orientation_weight=0.0)
+                    self.rig.set_q_raw(q_next)
+                    q_curr = q_next
+                    time.sleep(0.025)
+                    
+                # 4. Return smoothly to home
+                self.log_line("Returning to home pose...")
+                q_end = self.rig.get_q()
+                for a in np.linspace(0.0, 1.0, 45):
+                    self.rig.set_q_raw(q_end + a * (self.home_q - q_end))
+                    time.sleep(0.025)
+                    
+                self.log_line("Heart drawing complete.")
+            except Exception as e:
+                self.log_line(f"Drawing failed: {e}")
+            finally:
+                self.episode_running = False
+                self._enable_buttons()
+                
+        import threading
+        threading.Thread(target=heart_worker, daemon=True).start()
+
+    def _on_speed_change(self, val):
+        mult = float(val)
+        self.speed_label.config(text=f"{mult:.1f}x (dq_max={0.06*mult:.3f}rad, max_step={4.0*mult:.1f}deg)")
+
+    def _on_probes_change(self, val):
+        probes = int(val)
+        self.probes_label.config(text=f"{probes} probes")
 
     def log_line(self, msg):
         self.log.config(state="normal")
@@ -380,6 +715,7 @@ class RealUI:
             self.log_line(f"Connect failed: {e}")
             return
         self.model = PlacoModel()
+        self.home_q = self.rig.get_q()  # capture initial joints as reset home
         self.connect_btn.config(text="Disconnect")
         self.log_line("Connected.")
         self._update_frame()
@@ -424,12 +760,45 @@ class RealUI:
 
     # ---------- run ----------
     def on_test_blink(self):
-        """One gripper blink with full diagnostics -- the first thing to try
-        when babble reports unusable probes. Shows whether the camera can see
-        the gripper move at all, and how strongly."""
+        """One gripper blink or color marker detection with full diagnostics."""
         if self.rig is None or self.episode_running:
             self.log_line("Connect the arm first (and wait for any running episode).")
             return
+        
+        mode = self.track_mode_var.get()
+        if mode == "marker":
+            from perception import locate_by_marker
+            hue = self.hue_var.get()
+            tol = self.tol_var.get()
+            min_sat = self.sat_var.get()
+            min_val = self.val_var.get()
+            
+            frame = self.rig.read()
+            px = locate_by_marker(frame, hue, tol, min_sat, min_val,
+                                  self.cfg.gripper_marker_area_min, self.cfg.gripper_marker_area_max)
+            if px is not None:
+                self.last_debug["s"] = px
+                self.log_line(
+                    f"Test Marker OK: gripper marker seen at {np.round(px, 0).tolist()} -- yellow cross.")
+            else:
+                self.log_line(
+                    f"Test Marker FAILED: no marker found with hue {hue}. "
+                    "Make sure the tape is visible, colors are correct, and lighting is adequate.")
+            return
+        elif mode == "aruco":
+            from perception import locate_by_aruco
+            marker_id = self.aruco_id_var.get()
+            frame = self.rig.read()
+            px = locate_by_aruco(frame, marker_id=marker_id)
+            if px is not None:
+                self.last_debug["s"] = px
+                self.log_line(
+                    f"Test AruCo OK: marker ID {marker_id} seen at {np.round(px, 0).tolist()} -- yellow cross.")
+            else:
+                self.log_line(
+                    f"Test AruCo FAILED: no marker with ID {marker_id} found in the camera view.")
+            return
+
         from perception import blink_measure
         scfg = ServoConfig(blink_null_gap_s=0.15)
         px, info = blink_measure(self.rig, scfg)
@@ -474,8 +843,30 @@ class RealUI:
                 self._detector_classes = classes
             detector = self.detector
 
+        speed_val = self.speed_var.get()
+        probes_val = self.probes_var.get()
+        mode = self.track_mode_var.get()
+        marker_hue = self.hue_var.get() if mode == "marker" else None
+        use_aruco = (mode == "aruco")
+        aruco_id = self.aruco_id_var.get()
+
+        rc = self.rig.cfg if self.rig is not None else RealConfig()
         scfg = ServoConfig(tol_coarse_px=18.0, tol_fine_px=12.0, reject_px=45.0,
-                          measure_every=3, blink_null_gap_s=0.15)
+                          measure_every=3, blink_null_gap_s=0.15,
+                          gripper_marker_hue=marker_hue,
+                          gripper_marker_sat_min=self.sat_var.get(),
+                          gripper_marker_val_min=self.val_var.get(),
+                          hue_tol=self.tol_var.get(),
+                          use_aruco=use_aruco,
+                          aruco_id=aruco_id,
+                          stiction_comp=True,
+                          dq_max=0.06 * speed_val,
+                          babble_probes=int(probes_val),
+                          # null-space joint-limit repulsion needs the URDF limits
+                          q_lo=tuple(np.radians(rc.q_min_deg)),
+                          q_hi=tuple(np.radians(rc.q_max_deg)))
+        if self.rig is not None:
+            self.rig.cfg.max_step_deg = 4.0 * speed_val
         if not hasattr(self, "rng"):
             self.rng = np.random.default_rng(0)  # persists across episodes, not reseeded each run
         manual_target = None if self.nanodet_var.get() else self.pick_px
@@ -488,8 +879,7 @@ class RealUI:
         # below so nothing else can touch the camera or motors concurrently.
         self.episode_running = True
         self._episode_result = None
-        for b in (self.connect_btn, self.preview_btn, self.bg_btn, self.blink_btn, self.run_btn):
-            b.config(state="disabled")
+        self._disable_buttons()
         self.log_line("Running episode (window stays responsive; video keeps updating)...")
 
         def worker():
@@ -515,8 +905,7 @@ class RealUI:
         self.J = res["J"]
         self.log_line(f"Result: {res['reason']!r}")
         self.episode_running = False
-        for b in (self.connect_btn, self.preview_btn, self.bg_btn, self.blink_btn, self.run_btn):
-            b.config(state="normal")
+        self._enable_buttons()
 
     # ---------- live preview ----------
     def _update_frame(self):
@@ -540,7 +929,46 @@ class RealUI:
             self.root.after(200, self._update_frame)
             return
         self.last_frame = frame
-        img = frame.copy()
+        mode = self.track_mode_var.get()
+        if mode == "marker" and self.hsv_preview_var.get():
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            hue = self.hue_var.get()
+            tol = self.tol_var.get()
+            min_sat = self.sat_var.get()
+            min_val = self.val_var.get()
+            lo, hi = hue - tol, hue + tol
+            if lo < 0:
+                mask = cv2.inRange(hsv, (0, min_sat, min_val), (hi, 255, 255)) | \
+                       cv2.inRange(hsv, (180 + lo, min_sat, min_val), (179, 255, 255))
+            elif hi > 179:
+                mask = cv2.inRange(hsv, (lo, min_sat, min_val), (179, 255, 255)) | \
+                       cv2.inRange(hsv, (0, min_sat, min_val), (hi - 180, 255, 255))
+            else:
+                mask = cv2.inRange(hsv, (lo, min_sat, min_val), (hi, 255, 255))
+            mask = cv2.erode(mask, np.ones((3, 3), np.uint8))
+            mask = cv2.dilate(mask, np.ones((3, 3), np.uint8))
+            img = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        else:
+            img = frame.copy()
+            if mode == "aruco":
+                try:
+                    dictionary_id = cv2.aruco.DICT_4X4_50
+                    try:
+                        # OpenCV 4.7.0+ API
+                        dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
+                        parameters = cv2.aruco.DetectorParameters()
+                        detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+                        corners, ids, rejected = detector.detectMarkers(frame)
+                    except AttributeError:
+                        # Older OpenCV API
+                        dictionary = cv2.aruco.Dictionary_get(dictionary_id)
+                        parameters = cv2.aruco.DetectorParameters_create()
+                        corners, ids, rejected = cv2.aruco.detectMarkers(frame, dictionary, parameters=parameters)
+                    
+                    if ids is not None:
+                        cv2.aruco.drawDetectedMarkers(img, corners, ids)
+                except Exception:
+                    pass
         if self.pick_px is not None:
             cv2.drawMarker(img, tuple(np.int32(self.pick_px)), (0, 0, 255),
                            cv2.MARKER_CROSS, 18, 2)
@@ -582,19 +1010,25 @@ class RealUI:
         self.root.destroy()
 
 
-def run_ui():
+def run_ui(cfg):
     import tkinter as tk
     root = tk.Tk()
-    RealUI(root)
+    RealUI(root, cfg)
     root.mainloop()
+
+
+def run_web_ui(cfg):
+    from web_ui import run_web_ui as start_server
+    start_server(cfg)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     cfg = RealConfig()
     ap.add_argument("--ui", action="store_true",
-                    help="interactive UI: browse cameras, auto-detect the arm port, "
-                         "click a pick target and/or drop location, run episodes")
+                    help="launch the beautiful React-based Web UI (default)")
+    ap.add_argument("--tk-ui", action="store_true",
+                    help="launch the legacy Tkinter desktop UI")
     ap.add_argument("--port", default=cfg.port)
     ap.add_argument("--camera", type=int, default=cfg.camera_index)
     ap.add_argument("--id", default=cfg.robot_id)
@@ -610,13 +1044,22 @@ def main():
     ap.add_argument("--classes", default=None,
                     help="comma-separated COCO class allowlist for nanodet "
                          f"(default: {','.join(TABLETOP_CLASSES)}; 'all' = all 80)")
+    ap.add_argument("--gripper-marker-hue", type=int, default=None,
+                    help="OpenCV Hue (0-179) of the color marker tape on the gripper tip "
+                         "to track it passively/instantaneously without wiggling/blinking.")
     args = ap.parse_args()
 
+    cfg.port, cfg.camera_index, cfg.robot_id = args.port, args.camera, args.id
+    cfg.gripper_marker_hue = args.gripper_marker_hue
+
     if args.ui:
-        run_ui()
+        run_web_ui(cfg)
         return
 
-    cfg.port, cfg.camera_index, cfg.robot_id = args.port, args.camera, args.id
+    if args.tk_ui:
+        run_ui(cfg)
+        return
+
     rig = SO101Rig(cfg)
     try:
         if args.calibrate_gripper:
@@ -629,7 +1072,9 @@ def main():
         # can watch the real camera's actual blink noise on hardware.
         scfg = ServoConfig(tol_coarse_px=18.0, tol_fine_px=12.0, reject_px=45.0,
                            measure_every=3,  # blink 1/3 as often; J dead-reckons between
-                           blink_null_gap_s=0.15)
+                           blink_null_gap_s=0.15,
+                           gripper_marker_hue=cfg.gripper_marker_hue,
+                           stiction_comp=True)
         rng = np.random.default_rng(args.seed)
         detector = None
         if args.detector == "nanodet":

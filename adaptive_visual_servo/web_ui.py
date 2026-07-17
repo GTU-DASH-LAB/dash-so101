@@ -729,7 +729,10 @@ def run_episode_endpoint():
                 stiction_comp=True,
                 dq_max=0.06 * speed,
                 babble_probes=int(probes),
-                grasp_z=cfg.grasp_z)
+                grasp_z=cfg.grasp_z,
+                # null-space joint-limit repulsion needs the URDF limits
+                q_lo=tuple(np.radians(cfg.q_min_deg)),
+                q_hi=tuple(np.radians(cfg.q_max_deg)))
             cfg.max_step_deg = 4.0 * speed
 
             manual_target = np.array(pick_px) if pick_px else None

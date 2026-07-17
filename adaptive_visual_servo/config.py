@@ -44,7 +44,7 @@ class SimConfig:
 class ServoConfig:
     # babbling
     babble_probes: int = 22
-    babble_step: float = 0.05  # max |dq| per joint per probe (any DOF count)
+    babble_step: float = 0.12  # max |dq| per joint per probe (any DOF count)
     # servo loop
     lam: float = 0.5           # fraction of error corrected per step
     dq_max: float = 0.06       # per-joint per-step clamp (rad; deg on real)
@@ -53,8 +53,8 @@ class ServoConfig:
     min_dq: float = 0.004      # skip Broyden update below this
     tol_coarse_px: float = 7.0
     tol_fine_px: float = 4.0
-    max_steps: int = 60
-    diverge_patience: int = 5
+    max_steps: int = 120
+    diverge_patience: int = 12
     measure_every: int = 1  # steps between real EE measurements (gripper blinks
                             # cost robot motion; >1 dead-reckons on J between
                             # them -- pb/real configs use 3 for ~3x fewer blinks)
@@ -93,6 +93,38 @@ class ServoConfig:
     track_roi: int = 80              # bg-diff search window during carry (locate_by_diff)
     track_max_jump: float = 25.0     # reject a diff blob this far from the kinematic prediction
     retries: int = 2                # grasp retries per episode
+    # encoder+vision fusion (fused_tracking.py): fit the fixed camera
+    # projection from babble blinks once, then track the EE by FK projection
+    # -- free and instant, no per-step blinking. Falls back to blink mode if
+    # the cross-validated fit is worse than fuse_max_rms.
+    fuse: bool = True
+    fuse_max_rms: float = 10.0      # px, cross-validated reprojection error gate
+    # gripper color marker tracking
+    gripper_marker_hue: int = None   # OpenCV hue (0-179) of marker tape on gripper. If set, tracks color passively without wiggling.
+    gripper_marker_sat_min: int = 60
+    gripper_marker_val_min: int = 50
+    gripper_marker_area_min: int = 15
+    gripper_marker_area_max: int = 5000
+    gripper_search_radius: float = 120.0 # max distance (px) allowed between predicted/previous and detected gripper position
+    stiction_comp: bool = False
+    use_aruco: bool = False
+    aruco_id: int = 48
+    aruco_wrist_id: int = 49
+    # null-space secondary objectives (control.make_null_fn / servo_to):
+    # dq = J+(lam*e) + (I - J+J) dq_null. The 2xN image Jacobian on a 5-DOF
+    # arm leaves a 3-dim null space -- spent on joint-limit repulsion
+    # (potential field) and on holding the wrist at the last pose where the
+    # tracking marker was actually seen (so the marker stays camera-facing
+    # instead of triggering ~30s wrist scans when it drops out).
+    null_k_lim: float = 0.04     # rad/step repulsion at a hard joint limit (0 = off)
+    null_k_vis: float = 0.15     # fraction/step of wrist error toward visible pose
+    null_deadzone: float = 0.75  # |q-mid| fraction of half-range where repulsion starts
+    q_lo: tuple = None           # per-joint soft limits (radians); None = repulsion off
+    q_hi: tuple = None           # (real runs wire these from RealConfig.q_min/max_deg)
+    wrist_joints: tuple = (3, 4)  # wrist_flex, wrist_roll on the SO-101
+
+
+
 
 
 @dataclass
@@ -146,3 +178,28 @@ class RealConfig:
     # (assets/SO101/so101_new_calib.urdf) -- authoritative, not guessed.
     q_min_deg: tuple = (-110.0, -100.0, -96.83, -95.0, -157.21)
     q_max_deg: tuple = (110.0, 100.0, 96.83, 95.0, 162.79)
+    gripper_marker_hue: int = None
+    # ArUco marker calibration
+    aruco_ws_marker_size: float = 0.033    # workspace markers (IDs 0-3): 3.3cm side
+    aruco_robot_marker_size: float = 0.018  # robot markers (IDs 48,49): 1.8cm side
+    workspace_marker_ids: tuple = (0, 1, 2, 3)
+    gripper_marker_id: int = 48
+    wrist_marker_id: int = 49
+    grasp_z: float = 0.018  # default grasp height in meters (1.8cm)
+    calibration_file: str = "calibration.json"  # saved intrinsics + extrinsics
+    # Default workspace marker 3D positions in workspace frame (meters).
+    # Assumes markers at four corners of a rectangular table, origin at marker 0.
+    # Override these with your actual measured positions for best accuracy.
+    workspace_marker_positions: dict = None  # set in __post_init__
+
+    def __post_init__(self):
+        if self.workspace_marker_positions is None:
+            # Default: 63cm × 60cm table, markers at corners, Z=0 (table surface)
+            # User reports ~10cm max measurement error; calibration absorbs it.
+            self.workspace_marker_positions = {
+                0: [0.0,  0.0,  0.0],
+                1: [0.63, 0.0,  0.0],
+                2: [0.63, 0.60, 0.0],
+                3: [0.0,  0.60, 0.0],
+            }
+
