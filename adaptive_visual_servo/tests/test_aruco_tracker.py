@@ -136,6 +136,9 @@ def test_charuco_calibration_recovers_focal_length():
     fx_err = abs(cam_mtx[0, 0] - 600.0) / 600.0
     assert fx_err < 0.05, f"fx {cam_mtx[0,0]:.1f} vs true 600 ({fx_err*100:.1f}% off)"
     assert rms < 2.0, f"reprojection rms {rms:.2f}px"
+    # true camera has zero distortion: wild coefficients mean the model is
+    # overfitting views again (live failure mode: k2=-29 from 5 frames)
+    assert np.max(np.abs(dist)) < 0.5, f"distortion overfit: {dist}"
 
 
 def test_charuco_calibration_fails_cleanly_on_wrong_board():

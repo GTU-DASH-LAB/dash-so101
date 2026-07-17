@@ -487,17 +487,29 @@ def calibrate_camera_charuco(frames: List[np.ndarray],
                 all_charuco_corners.append(charuco_corners)
                 all_charuco_ids.append(charuco_ids)
 
+    # Constrain the distortion model: a handful of handheld webcam views
+    # cannot pin down the full 5-term polynomial -- observed live: 5 frames
+    # gave RMS 0.112px in-sample but k2=-29 (physical webcams are ~|0.2|),
+    # so every projection outside the fitted corner envelope exploded
+    # (marker pose axes drawn hundreds of px off). k1(+k2 with enough
+    # views) is all a narrow-FOV webcam needs.
+    flags = cv2.CALIB_ZERO_TANGENT_DIST | cv2.CALIB_FIX_K3
+    n_views = len(all_obj) if use_new else len(all_charuco_corners)
+    if n_views < 10:
+        flags |= cv2.CALIB_FIX_K2
+
     try:
         if use_new:
             if len(all_obj) < 3:
                 return None, None, float('inf')
             ret, camera_matrix, dist_coeffs, _, _ = cv2.calibrateCamera(
-                all_obj, all_img, img_size, None, None)
+                all_obj, all_img, img_size, None, None, flags=flags)
         else:
             if len(all_charuco_corners) < 3:
                 return None, None, float('inf')
             ret, camera_matrix, dist_coeffs, _, _ = cv2.aruco.calibrateCameraCharuco(
-                all_charuco_corners, all_charuco_ids, board, img_size, None, None)
+                all_charuco_corners, all_charuco_ids, board, img_size, None, None,
+                flags=flags)
     except Exception:
         return None, None, float('inf')
 
