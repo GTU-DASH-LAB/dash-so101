@@ -301,8 +301,18 @@ def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px, shape_dq=None,
         if np.linalg.norm(dq_actual) < scfg.min_dq and np.linalg.norm(dq) > scfg.min_dq:
             frozen += 1
             if frozen >= 6:
+                which = ""
+                if getattr(scfg, "q_lo", None) is not None:
+                    names = ("pan", "lift", "elbow", "flex", "roll")
+                    q_now = q_before + dq_actual
+                    lo, hi = np.asarray(scfg.q_lo), np.asarray(scfg.q_hi)
+                    near = [names[i] if i < len(names) else f"j{i}"
+                            for i in range(len(q_now))
+                            if q_now[i] - lo[i] < 0.035 or hi[i] - q_now[i] < 0.035]
+                    which = (f" Joints at limit: {', '.join(near)}." if near
+                             else " No joint near a limit -- check torque/comms.")
                 debug(dict(msg="  [servo_to] Aborted: arm not moving (commands "
-                               "clipped at joint limits -- target may be out of reach)."))
+                               f"clipped -- target may be out of reach).{which}"))
                 return False, J, s_ee
         else:
             frozen = 0
@@ -614,12 +624,17 @@ def run_episode(rig, model, scfg, background, rng,
         try:
             pairs = [] if fused is not None else None
             J2, _ = babble(rig, scfg, rng, pair_sink=pairs)
-            if fused is not None:
+            if fused is None:
+                J = J2
+            elif hasattr(fused, "add_pairs"):  # DLT tracker: batch refit
                 debug(dict(msg="[servo_recover] Re-fitting FusedTracker with new calibration pairs..."))
                 fused.add_pairs([p[0] for p in pairs], [p[1] for p in pairs])
                 fused.fit(scfg.fuse_max_rms)  # refit with more data
-            else:
-                J = J2
+            elif hasattr(fused, "update"):  # analytical tracker: EKF the pairs
+                n_ok = sum(1 for q_p, px_p in pairs
+                           if fused.update(q_p, px_p) is not None)
+                debug(dict(msg=f"[servo_recover] EKF base-offset refined from "
+                               f"{n_ok}/{len(pairs)} babble pairs."))
         except RuntimeError as e:
             debug(dict(msg=f"[servo_recover] Babble failed: {e}"))
             return False  # e.g. EE not visible right now -- recovery failed, not a crash
