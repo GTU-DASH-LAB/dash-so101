@@ -105,9 +105,9 @@ def test_charuco_calibration_recovers_focal_length():
     observed live as 'Calibration failed' on every frame with cv2 4.13)."""
     from aruco_tracker import calibrate_camera_charuco, create_charuco_board
 
-    board, _ = create_charuco_board()
-    board_img = board.generateImage((1447, 1034), marginSize=20, borderBits=1)
-    bw, bh = 0.245, 0.175  # 7x5 squares of 35mm, meters
+    board, _ = create_charuco_board()  # project default: 11x8, 50/30mm
+    board_img = board.generateImage((1650, 1200), marginSize=20, borderBits=1)
+    bw, bh = 0.55, 0.40  # 11x8 squares of 50mm, meters
     K_true = np.array([[600.0, 0, 320], [0, 600.0, 240], [0, 0, 1]])
 
     def view(rx, ry, tx, ty, tz):
@@ -124,12 +124,12 @@ def test_charuco_calibration_recovers_focal_length():
         return cv2.warpPerspective(board_img, H, (640, 480), borderValue=255)
 
     frames = [view(rx, ry, tx, ty, tz) for rx, ry, tx, ty, tz in [
-        (0.00,  0.00, -0.12, -0.09, 0.42),
-        (0.25,  0.00, -0.14, -0.06, 0.45),
-        (-0.25, 0.00, -0.11, -0.11, 0.44),
-        (0.00,  0.25, -0.15, -0.08, 0.46),
-        (0.00, -0.25, -0.10, -0.09, 0.43),
-        (0.20, -0.20, -0.13, -0.07, 0.47),
+        (0.00,  0.00, -0.28, -0.21, 0.72),
+        (0.25,  0.00, -0.30, -0.18, 0.78),
+        (-0.25, 0.00, -0.26, -0.23, 0.76),
+        (0.00,  0.25, -0.31, -0.20, 0.80),
+        (0.00, -0.25, -0.25, -0.21, 0.74),
+        (0.20, -0.20, -0.29, -0.19, 0.82),
     ]]
     cam_mtx, dist, rms = calibrate_camera_charuco(frames)
     assert cam_mtx is not None, "calibration returned None on clean synthetic views"

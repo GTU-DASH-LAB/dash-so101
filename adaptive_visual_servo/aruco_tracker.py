@@ -389,15 +389,37 @@ def workspace_to_pixel(point_3d: np.ndarray,
 # Camera intrinsic calibration (ChArUco)
 # ---------------------------------------------------------------------------
 
-def create_charuco_board(squares_x: int = 7, squares_y: int = 5,
-                         square_length: float = 0.035,
-                         marker_length: float = 0.022):
+# Default ChArUco board spec = the board actually in use ("ChArUco 11x8,
+# 300dpi, 50mm spacing, 30mm markers" print, DICT_4X4 ids 0-43). Single
+# source of truth -- web_ui's endpoint imports these for its defaults.
+# Absolute print scale doesn't matter for intrinsics (scale is absorbed by
+# the extrinsics); the layout and the 30/50 marker/square ratio do.
+CHARUCO_SQUARES_X = 11
+CHARUCO_SQUARES_Y = 8
+CHARUCO_SQUARE_LEN = 0.050
+CHARUCO_MARKER_LEN = 0.030
+
+
+def create_charuco_board(squares_x: int = CHARUCO_SQUARES_X,
+                         squares_y: int = CHARUCO_SQUARES_Y,
+                         square_length: float = CHARUCO_SQUARE_LEN,
+                         marker_length: float = CHARUCO_MARKER_LEN,
+                         legacy: bool = True):
     """Create a ChArUco board for calibration.
-    Returns (board, dictionary) for detection."""
+    Returns (board, dictionary) for detection.
+
+    legacy=True matches calib.io / pre-OpenCV-4.6 prints, where the markers
+    sit on the OTHER chessboard-square parity than OpenCV>=4.6's default.
+    Our physical board is such a print -- verified against its PDF: with the
+    modern pattern 44/44 markers decode but 0/70 corners interpolate; with
+    the legacy flag, 70/70. The old CharucoBoard_create API below is
+    inherently legacy-layout, so both branches produce the same board."""
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     try:
         board = cv2.aruco.CharucoBoard(
             (squares_x, squares_y), square_length, marker_length, dictionary)
+        if legacy:
+            board.setLegacyPattern(True)
     except TypeError:
         board = cv2.aruco.CharucoBoard_create(
             squares_x, squares_y, square_length, marker_length, dictionary)
@@ -405,9 +427,10 @@ def create_charuco_board(squares_x: int = 7, squares_y: int = 5,
 
 
 def calibrate_camera_charuco(frames: List[np.ndarray],
-                             squares_x: int = 7, squares_y: int = 5,
-                             square_length: float = 0.035,
-                             marker_length: float = 0.022) -> Tuple[Optional[np.ndarray],
+                             squares_x: int = CHARUCO_SQUARES_X,
+                             squares_y: int = CHARUCO_SQUARES_Y,
+                             square_length: float = CHARUCO_SQUARE_LEN,
+                             marker_length: float = CHARUCO_MARKER_LEN) -> Tuple[Optional[np.ndarray],
                                                                      Optional[np.ndarray],
                                                                      float]:
     """Calibrate camera intrinsics from ChArUco board images.

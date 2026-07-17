@@ -30,7 +30,9 @@ from config import RealConfig, ServoConfig
 from aruco_tracker import (ArucoDetector, CalibrationData,
                            calibrate_workspace, estimate_default_intrinsics,
                            calibrate_camera_charuco, pixel_to_workspace,
-                           workspace_to_pixel)
+                           workspace_to_pixel,
+                           CHARUCO_SQUARES_X, CHARUCO_SQUARES_Y,
+                           CHARUCO_SQUARE_LEN, CHARUCO_MARKER_LEN)
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -329,21 +331,22 @@ def calibrate_intrinsics():
         return jsonify({"error": f"Need at least 5 frames, have {len(frames)}"}), 400
 
     # Board spec must match the PHYSICAL printed board (columns x rows of
-    # chessboard squares, side lengths in meters). Defaults = the board in
-    # assets/charuco_7x5_DICT4X4.png; override via JSON body for other prints.
+    # chessboard squares, side lengths in meters). Defaults come from
+    # aruco_tracker's CHARUCO_* constants; override via JSON body for
+    # other prints.
     data = request.json or {}
-    sx = int(data.get("squares_x", 7))
-    sy = int(data.get("squares_y", 5))
-    sq = float(data.get("square_length", 0.035))
-    mk = float(data.get("marker_length", 0.022))
+    sx = int(data.get("squares_x", CHARUCO_SQUARES_X))
+    sy = int(data.get("squares_y", CHARUCO_SQUARES_Y))
+    sq = float(data.get("square_length", CHARUCO_SQUARE_LEN))
+    mk = float(data.get("marker_length", CHARUCO_MARKER_LEN))
 
     emit_log(f"Calibrating intrinsics from {len(frames)} frames "
              f"({sx}x{sy} board, {sq*1000:.0f}mm squares)...")
     cam_mtx, dist, rms = calibrate_camera_charuco(frames, sx, sy, sq, mk)
     if cam_mtx is None:
         emit_log("Intrinsic calibration failed — not enough ChArUco corners "
-                 f"matched a {sx}x{sy} DICT_4X4_50 board. Check the printed "
-                 "board matches this spec (assets/charuco_7x5_DICT4X4.png).")
+                 f"matched a {sx}x{sy} DICT_4X4 board. Check the printed "
+                 "board matches this spec and fills a good part of the frame.")
         return jsonify({"error": "Calibration failed"}), 400
 
     cal = state["calibration"]
