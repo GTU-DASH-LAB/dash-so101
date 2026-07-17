@@ -433,11 +433,20 @@ def run_episode(rig, model, scfg, background, rng,
             grasp_ab = calibrate_grasp_frame(rig, scfg, predicted_px=s)
             fused.grasp_ab = grasp_ab
 
+        # AnalyticalFusedTracker: recursive (EKF) base-offset refinement from
+        # the same real marker measurements the anchors already take. Only
+        # marker-point measurements feed it -- anchor_fine measures the jaw
+        # CLOSURE point, a different physical point that would bias the offset.
+        kf_update = getattr(fused, "update", None)
+
         def anchor_coarse():
-            pred = fused.track_px(rig.get_q())
+            q_now = rig.get_q()
+            pred = fused.track_px(q_now)
             m = locate_gripper(rig, scfg, predicted_px=pred)
             if m is not None:
-                c[:] = m - pred
+                if kf_update is not None:
+                    kf_update(q_now, m)
+                c[:] = m - fused.track_px(q_now)  # residual on the UPDATED model
             return loc_coarse(None)
 
         def anchor_fine():
@@ -612,15 +621,18 @@ def run_episode(rig, model, scfg, background, rng,
         # exact prior), bg-diff CONFIRMS with a real 1-frame measurement (no
         # robot motion), and each accepted measurement re-anchors c.
         def _carry_meas():
-            pred = fused.track_px(rig.get_q()) + c
+            q_now = rig.get_q()
+            pred = fused.track_px(q_now) + c
             if getattr(scfg, "use_aruco", False):
                 m = locate_by_aruco(rig.read(), scfg.aruco_id, predicted_px=pred,
                                    max_dist=scfg.gripper_search_radius)
+                if m is not None and kf_update is not None:
+                    kf_update(q_now, m)  # marker semantics: safe to refine offset
             else:
                 m = locate_by_diff(rig.read(), background, pred, scfg.track_roi,
                                    scfg.bg_thresh, scfg.obj_min_area, scfg.track_max_jump)
             if m is not None:
-                c[:] = m - fused.track_px(rig.get_q())
+                c[:] = m - fused.track_px(q_now)
                 return m
             return pred
 
