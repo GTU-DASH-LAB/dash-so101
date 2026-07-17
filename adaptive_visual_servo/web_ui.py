@@ -328,10 +328,22 @@ def calibrate_intrinsics():
     if len(frames) < 5:
         return jsonify({"error": f"Need at least 5 frames, have {len(frames)}"}), 400
 
-    emit_log(f"Calibrating intrinsics from {len(frames)} frames...")
-    cam_mtx, dist, rms = calibrate_camera_charuco(frames)
+    # Board spec must match the PHYSICAL printed board (columns x rows of
+    # chessboard squares, side lengths in meters). Defaults = the board in
+    # assets/charuco_7x5_DICT4X4.png; override via JSON body for other prints.
+    data = request.json or {}
+    sx = int(data.get("squares_x", 7))
+    sy = int(data.get("squares_y", 5))
+    sq = float(data.get("square_length", 0.035))
+    mk = float(data.get("marker_length", 0.022))
+
+    emit_log(f"Calibrating intrinsics from {len(frames)} frames "
+             f"({sx}x{sy} board, {sq*1000:.0f}mm squares)...")
+    cam_mtx, dist, rms = calibrate_camera_charuco(frames, sx, sy, sq, mk)
     if cam_mtx is None:
-        emit_log("Intrinsic calibration failed — not enough ChArUco corners detected.")
+        emit_log("Intrinsic calibration failed — not enough ChArUco corners "
+                 f"matched a {sx}x{sy} DICT_4X4_50 board. Check the printed "
+                 "board matches this spec (assets/charuco_7x5_DICT4X4.png).")
         return jsonify({"error": "Calibration failed"}), 400
 
     cal = state["calibration"]
