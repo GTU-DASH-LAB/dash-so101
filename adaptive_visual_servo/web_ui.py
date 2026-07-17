@@ -144,7 +144,7 @@ def list_cameras():
 
 @app.route("/api/connect", methods=["POST"])
 def connect():
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     cfg = state["cfg"]
     cfg.port = data.get("port", cfg.port)
     cfg.camera_index = data.get("camera_index", cfg.camera_index)
@@ -334,7 +334,7 @@ def calibrate_intrinsics():
     # chessboard squares, side lengths in meters). Defaults come from
     # aruco_tracker's CHARUCO_* constants; override via JSON body for
     # other prints.
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     sx = int(data.get("squares_x", CHARUCO_SQUARES_X))
     sy = int(data.get("squares_y", CHARUCO_SQUARES_Y))
     sq = float(data.get("square_length", CHARUCO_SQUARE_LEN))
@@ -405,7 +405,7 @@ def calibrate_ws():
     if not cal.has_intrinsics():
         return jsonify({"error": "Calibrate or estimate intrinsics first"}), 400
 
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     # Allow overriding marker positions from the UI
     marker_positions = {}
     if "marker_positions" in data:
@@ -518,7 +518,7 @@ def get_settings():
 
 @app.route("/api/settings", methods=["POST"])
 def update_settings():
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     cfg = state["cfg"]
     cal = state["calibration"]
     
@@ -621,7 +621,7 @@ def estop_arm():
 def draw_shape():
     if state["rig"] is None or state["episode_running"]:
         return _busy_error()
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     shape = data.get("shape", "circle")
 
     def worker():
@@ -688,7 +688,7 @@ def test_tracking():
     if state["rig"] is None:
         return jsonify({"error": "Not connected"}), 400
 
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     marker_id = data.get("marker_id", state["cfg"].gripper_marker_id)
 
     from perception import locate_by_aruco
@@ -709,7 +709,7 @@ def run_episode_endpoint():
     if state["rig"] is None or state["episode_running"]:
         return _busy_error()
 
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     speed = data.get("speed", 1.0)
     probes = data.get("probes", 22)
     tracking_mode = data.get("tracking_mode", "aruco")
@@ -823,7 +823,7 @@ def pixel_to_world():
     if not cal.has_intrinsics() or not cal.has_workspace():
         return jsonify({"error": "Calibration incomplete"}), 400
 
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     px = np.array(data.get("px", [0, 0]), dtype=np.float64)
     z_plane = data.get("z_plane", 0.0)
 
@@ -841,7 +841,7 @@ def pixel_to_world():
 @app.route("/api/preview/start", methods=["POST"])
 def start_preview():
     """Start camera preview without arm connection."""
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     cam_index = data.get("camera_index", 0)
 
     if state.get("preview_cap") is not None:
