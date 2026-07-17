@@ -206,14 +206,21 @@ def babble(rig, scfg, rng, pair_sink=None):
         if pair_sink is not None:
             pair_sink.append((q.copy(), s.copy()))
     if len(dqs) < 2 * n:
+        if getattr(scfg, "use_aruco", False):
+            hint = (f"ArUco mode: marker {scfg.aruco_id}/{getattr(scfg, 'aruco_wrist_id', 49)} "
+                    "was not detected at most probe poses -- the wrist likely "
+                    "tilted the marker away from the camera or out of frame. "
+                    "Reposition the arm so the marker faces the camera, or use "
+                    "a larger marker.")
+        else:
+            hint = ("On real hardware, usual causes in order: gripper_open_pos/"
+                    "gripper_closed_pos miscalibrated so the fingers barely move "
+                    "between blink positions (run --calibrate-gripper, then use the "
+                    "UI's Test Blink), camera auto-exposure flicker, or the gripper "
+                    "out of the camera's view at the babble pose.")
         raise RuntimeError(
             f"babble: only {len(dqs)}/{scfg.babble_probes} usable probes "
-            f"({n_none} blinks saw no gripper motion, {n_glitch} jumped >120px). "
-            "On real hardware, usual causes in order: gripper_open_pos/"
-            "gripper_closed_pos miscalibrated so the fingers barely move "
-            "between blink positions (run --calibrate-gripper, then use the "
-            "UI's Test Blink), camera auto-exposure flicker, or the gripper "
-            "out of the camera's view at the babble pose.")
+            f"({n_none} probes saw no marker/EE, {n_glitch} jumped >120px). " + hint)
     Q, S = np.stack(dqs), np.stack(dss)
     if np.linalg.matrix_rank(Q, tol=1e-4) < n:
         raise RuntimeError("babble: probes do not span joint space")
@@ -250,7 +257,7 @@ def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px, shape_dq=None,
     """
     target = np.asarray(target_px, float)
     best = np.inf
-    stall = blind = since = 0
+    stall = blind = since = frozen = 0
     s_base = s_ee.copy()                    # s at last good measurement
     dq_acc = np.zeros(len(rig.get_q()))     # executed dq since then
     fresh = True                            # s_ee comes from a measurement
@@ -287,6 +294,18 @@ def servo_to(rig, scfg, J, s_ee, target_px, locate, tol_px, shape_dq=None,
         rig.set_q(q_before + dq)
         dq_actual = rig.get_q() - q_before  # post-clamp truth
         dq_acc += dq_actual
+        # fast abort when the arm physically stops responding: commands are
+        # being clipped away (joint limits / target outside reach). Observed
+        # live as ~90 steps frozen at the same error before the stall
+        # watchdog fired. Threshold = min_dq, above encoder read noise.
+        if np.linalg.norm(dq_actual) < scfg.min_dq and np.linalg.norm(dq) > scfg.min_dq:
+            frozen += 1
+            if frozen >= 6:
+                debug(dict(msg="  [servo_to] Aborted: arm not moving (commands "
+                               "clipped at joint limits -- target may be out of reach)."))
+                return False, J, s_ee
+        else:
+            frozen = 0
         s_pred = s_ee + J @ dq_actual
         since += 1
         # dead-reckon between measurements — unless prediction says we're at

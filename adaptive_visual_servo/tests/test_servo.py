@@ -91,3 +91,31 @@ if __name__ == "__main__":
         fn()
         print(f"ok {fn.__name__}")
     print("ALL OK")
+
+
+class _FrozenRig:
+    """Duck-typed rig whose joints never move -- as if every command is
+    clipped away at joint limits (target outside reach)."""
+
+    def __init__(self):
+        self.q = np.zeros(5)
+        self.set_calls = 0
+
+    def get_q(self):
+        return self.q.copy()
+
+    def set_q(self, q):
+        self.set_calls += 1
+
+
+def test_servo_aborts_fast_when_arm_frozen():
+    """Commands clipped to zero motion must abort within a few steps with a
+    clear reason, not burn ~90 steps until the stall watchdog (observed live
+    with an unreachable target from a bad base-offset calibration)."""
+    rig = _FrozenRig()
+    J = np.array([[80.0, 0, 0, 0, 0], [0, 80.0, 0, 0, 0]])
+    s = np.array([100.0, 100.0])
+    ok, _, _ = servo_to(rig, SCFG, J, s.copy(), np.array([300.0, 250.0]),
+                        lambda pred: s.copy(), tol_px=5.0)
+    assert not ok
+    assert rig.set_calls <= 10, f"took {rig.set_calls} steps to notice a frozen arm"

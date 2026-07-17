@@ -87,6 +87,19 @@ def emit_log(msg: str):
     socketio.emit("log", {"msg": msg, "ts": time.time()})
 
 
+def _invalidate_workspace(cal):
+    """Workspace extrinsics are solved UNDER a specific camera matrix; after
+    intrinsics change they describe a different camera. Observed live: an
+    fx=628 ChArUco workspace fit reused with fx=554 estimated intrinsics
+    produced a physically absurd base offset (z=0.344m) and an unusable
+    fused-tracking Jacobian. Force a workspace recalibration instead."""
+    if cal.has_workspace():
+        cal.ws_rvec = None
+        cal.ws_tvec = None
+        emit_log("Workspace extrinsics cleared (they were solved under the old "
+                 "intrinsics) — run Calibrate Workspace again.")
+
+
 def _busy_error():
     """Distinct guard errors so 'reset failed' isn't ambiguous in the log."""
     if state["rig"] is None:
@@ -354,6 +367,7 @@ def calibrate_intrinsics():
     cal.dist_coeffs = dist
     cal.reprojection_error = rms
     cal.calibrated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+    _invalidate_workspace(cal)
 
     # Save
     cal_path = os.path.join(os.path.dirname(__file__), state["cfg"].calibration_file)
@@ -382,6 +396,7 @@ def estimate_intrinsics():
     cal.camera_matrix = cam_mtx
     cal.dist_coeffs = dist
     cal.calibrated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+    _invalidate_workspace(cal)
 
     cal_path = os.path.join(os.path.dirname(__file__), state["cfg"].calibration_file)
     cal.save(cal_path)
@@ -800,13 +815,23 @@ def run_episode_endpoint():
                     t_robot_ws = wrist_ws - wrist_robot
                     emit_log(f"Calibrated base offset: [{t_robot_ws[0]:.3f}, {t_robot_ws[1]:.3f}, {t_robot_ws[2]:.3f}]")
 
-                    from fused_tracking import AnalyticalFusedTracker
-                    tracker = AnalyticalFusedTracker(
-                        model.ee,
-                        cal.camera_matrix, cal.dist_coeffs,
-                        cal.ws_rvec, cal.ws_tvec,
-                        t_robot_ws
-                    )
+                    # plausibility gate: the arm's base sits ON the table, so
+                    # the robot->workspace z offset must be small. A large one
+                    # means inconsistent geometry (stale extrinsics vs new
+                    # intrinsics gave z=0.344m live -- the fused Jacobian was
+                    # garbage and the servo stalled at its joint limits).
+                    if abs(t_robot_ws[2]) > 0.15:
+                        emit_log(f"Base offset z={t_robot_ws[2]:+.3f}m is implausible "
+                                 "(base sits on the table). Recalibrate intrinsics + "
+                                 "workspace as a pair. Falling back to active babble.")
+                    else:
+                        from fused_tracking import AnalyticalFusedTracker
+                        tracker = AnalyticalFusedTracker(
+                            model.ee,
+                            cal.camera_matrix, cal.dist_coeffs,
+                            cal.ws_rvec, cal.ws_tvec,
+                            t_robot_ws
+                        )
                 else:
                     emit_log("Wrist marker not detected at start pose. Falling back to active babble.")
 
