@@ -95,7 +95,7 @@ def detect_pad(frame, hue, tol=14, min_area=300):
     return blobs[0].center if blobs else None
 
 
-def blink_measure(rig, scfg):
+def blink_measure(rig, scfg, predicted_px=None, max_dist=120.0):
     """Markerless EE localization by synchronous detection: the gripper is
     the only thing in the scene that changes exactly WHEN commanded, in BOTH
     directions, at the SAME place.
@@ -141,6 +141,11 @@ def blink_measure(rig, scfg):
 
     blobs = find_blobs(m, scfg.min_blob)
     kept = [x for x in blobs if x.area <= scfg.blink_max_blob]
+
+    # Prediction Gating: filter out blobs far from predicted position (e.g. hands)
+    if predicted_px is not None:
+        kept = [x for x in kept if np.linalg.norm(x.center - np.asarray(predicted_px)) <= max_dist]
+
     info = dict(n_raw=len(blobs), n_kept=len(kept),
                 areas=[x.area for x in kept],
                 noise_px=int(m_null.sum()))
@@ -152,9 +157,9 @@ def blink_measure(rig, scfg):
     return (weights @ centers) / weights.sum(), info
 
 
-def blink_locate(rig, scfg):
+def blink_locate(rig, scfg, predicted_px=None, max_dist=120.0):
     """blink_measure without the diagnostics -- the control pipeline's view."""
-    px, _ = blink_measure(rig, scfg)
+    px, _ = blink_measure(rig, scfg, predicted_px=predicted_px, max_dist=max_dist)
     return px
 
 
@@ -171,8 +176,8 @@ def filter_by_background(det_blobs, frame, background, thresh=28, min_area=80,
             if any(np.linalg.norm(b.center - e.center) < match_r for e in evidence)]
 
 
-def _blink_pair(rig, scfg, pair):
-    return blink_locate(rig, replace(scfg, blink_dg=pair))
+def _blink_pair(rig, scfg, pair, predicted_px=None, max_dist=120.0):
+    return blink_locate(rig, replace(scfg, blink_dg=pair), predicted_px=predicted_px, max_dist=max_dist)
 
 
 def _perp(v):
@@ -186,7 +191,34 @@ BLINK_LO = (0.6, 0.4)      # jaw position ~ g=0.5
 BLINK_CLOSURE = (0.12, 0.0)
 
 
-def calibrate_grasp_frame(rig, scfg):
+def locate_by_marker(frame, hue, tol=14, min_sat=60, min_val=50, min_area=15, max_area=5000,
+                     predicted_px=None, max_dist=120.0):
+    """Detects gripper position by color marker tip.
+    Passive and instantaneous; no wiggling needed."""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lo, hi = int(hue) - tol, int(hue) + tol
+    if lo < 0:
+        mask = cv2.inRange(hsv, (0, min_sat, min_val), (hi, 255, 255)) | \
+               cv2.inRange(hsv, (180 + lo, min_sat, min_val), (179, 255, 255))
+    elif hi > 179:
+        mask = cv2.inRange(hsv, (lo, min_sat, min_val), (179, 255, 255)) | \
+               cv2.inRange(hsv, (0, min_sat, min_val), (hi - 180, 255, 255))
+    else:
+        mask = cv2.inRange(hsv, (lo, min_sat, min_val), (hi, 255, 255))
+
+    mask = cv2.erode(mask, np.ones((3, 3), np.uint8))
+    mask = cv2.dilate(mask, np.ones((3, 3), np.uint8))
+
+    blobs = find_blobs(mask, min_area)
+    blobs = [b for b in blobs if b.area <= max_area]
+
+    if predicted_px is not None:
+        blobs = [b for b in blobs if np.linalg.norm(b.center - np.asarray(predicted_px)) <= max_dist]
+
+    return blobs[0].center if blobs else None
+
+
+def calibrate_grasp_frame(rig, scfg, predicted_px=None):
     """One-time (per episode) self-calibration of where the jaws actually
     close, for single-moving-jaw grippers like the SO-101.
 
@@ -202,8 +234,11 @@ def calibrate_grasp_frame(rig, scfg):
     Call ONLY with the hand in free air (e.g. right after babbling). Returns
     (a, b), or (0, 0) for symmetric grippers (both jaws move -> no offset),
     or None if the blinks failed."""
-    c1 = _blink_pair(rig, scfg, BLINK_HI)
-    c2 = _blink_pair(rig, scfg, BLINK_LO)
+    if getattr(scfg, "gripper_marker_hue", None) is not None or getattr(scfg, "use_aruco", False):
+        return (0.0, 0.0)  # Passive trackers don't wiggle; no jaw-offset calibration needed.
+
+    c1 = _blink_pair(rig, scfg, BLINK_HI, predicted_px=predicted_px, max_dist=scfg.gripper_search_radius)
+    c2 = _blink_pair(rig, scfg, BLINK_LO, predicted_px=predicted_px, max_dist=scfg.gripper_search_radius)
     if c1 is None or c2 is None:
         rig.set_gripper(1.0)
         return None
@@ -211,7 +246,7 @@ def calibrate_grasp_frame(rig, scfg):
     if np.linalg.norm(d) < 3.0:
         rig.set_gripper(1.0)
         return (0.0, 0.0)  # symmetric gripper: blink centroid is already the grasp point
-    closure = _blink_pair(rig, scfg, BLINK_CLOSURE)
+    closure = _blink_pair(rig, scfg, BLINK_CLOSURE, predicted_px=predicted_px, max_dist=scfg.gripper_search_radius)
     rig.set_gripper(1.0)  # blink restores its pair's first value; travel open
     if closure is None:
         return None
@@ -220,11 +255,22 @@ def calibrate_grasp_frame(rig, scfg):
     return (float(a), float(b))
 
 
-def locate_grasp_point(rig, scfg, ab):
+def locate_grasp_point(rig, scfg, ab, predicted_px=None):
     """Grasp-point (jaw-closure) locator using only safe open-range blinks
     plus the calibrated sweep-frame offset from calibrate_grasp_frame."""
-    c1 = _blink_pair(rig, scfg, BLINK_HI)
-    c2 = _blink_pair(rig, scfg, BLINK_LO)
+    if getattr(scfg, "use_aruco", False):
+        return locate_by_aruco(rig.read(), scfg.aruco_id, predicted_px=predicted_px,
+                               max_dist=scfg.gripper_search_radius)
+
+    if getattr(scfg, "gripper_marker_hue", None) is not None:
+        # Marker mode: passive and instantaneous color tracking directly
+        return locate_by_marker(rig.read(), scfg.gripper_marker_hue, scfg.hue_tol,
+                                scfg.gripper_marker_sat_min, scfg.gripper_marker_val_min,
+                                scfg.gripper_marker_area_min, scfg.gripper_marker_area_max,
+                                predicted_px=predicted_px, max_dist=scfg.gripper_search_radius)
+
+    c1 = _blink_pair(rig, scfg, BLINK_HI, predicted_px=predicted_px, max_dist=scfg.gripper_search_radius)
+    c2 = _blink_pair(rig, scfg, BLINK_LO, predicted_px=predicted_px, max_dist=scfg.gripper_search_radius)
     rig.set_gripper(1.0)
     if c1 is None or c2 is None:
         return None
@@ -263,3 +309,42 @@ def locate_by_diff(frame, background, center, roi=80, thresh=28, min_area=30, ma
     if np.linalg.norm(best.center - c) > max_jump:
         return None
     return best.center + np.array([x0, y0])
+
+
+_DETECTOR_CACHE = {}
+
+
+def get_cached_detector(dictionary_id):
+    from aruco_tracker import ArucoDetector
+    if dictionary_id not in _DETECTOR_CACHE:
+        _DETECTOR_CACHE[dictionary_id] = ArucoDetector(dictionary_id)
+    return _DETECTOR_CACHE[dictionary_id]
+
+
+def locate_by_aruco(frame, marker_id=0, dictionary_id=None, predicted_px=None, max_dist=120.0):
+    """Detects gripper position by AruCo marker using cached high-sensitivity detector."""
+    if dictionary_id is None:
+        try:
+            dictionary_id = cv2.aruco.DICT_4X4_50
+        except AttributeError:
+            return None
+
+    try:
+        detector = get_cached_detector(dictionary_id)
+        corners, ids, _ = detector.detect(frame)
+
+        if ids is not None:
+            for idx, m_id in enumerate(ids.flatten()):
+                if m_id == marker_id:
+                    c = corners[idx][0]
+                    center = np.mean(c, axis=0)
+                    # search-radius gate vs the motion-model prediction: a
+                    # detection implausibly far away is a misdetection (was
+                    # silently ignored before -- the params existed unused)
+                    if (predicted_px is not None and
+                            np.linalg.norm(center - np.asarray(predicted_px)) > max_dist):
+                        return None
+                    return center
+    except Exception:
+        pass
+    return None

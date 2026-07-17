@@ -148,3 +148,59 @@ def test_charuco_calibration_fails_cleanly_on_wrong_board():
     frames = [np.full((480, 640), 255, np.uint8) for _ in range(5)]
     cam_mtx, dist, rms = calibrate_camera_charuco(frames)
     assert cam_mtx is None and rms == float('inf')
+
+
+def _marker_frame(mid, x, y, size=48, hole=False):
+    """White 640x480 canvas with a DICT_4X4_50 marker at (x, y). hole=True
+    wipes the payload bits with a gray blotch (like specular glare): decoding
+    fails deterministically, but the outer corners stay LK-trackable."""
+    dic = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    tile = cv2.aruco.generateImageMarker(dic, mid, size)
+    img = np.full((480, 640), 255, np.uint8)
+    img[y:y + size, x:x + size] = tile
+    if hole:
+        q = size // 3
+        img[y + q:y + size - q, x + q:x + size - q] = 128
+    return img
+
+
+def test_lk_tracking_bridges_decode_dropout():
+    """A marker that decoded last frame but is too blurred to decode now must
+    still be reported (LK-tracked corners), near its true shifted position."""
+    det = ArucoDetector()
+    f1 = _marker_frame(48, 300, 200)
+    markers = det.detect_all(f1)
+    assert 48 in markers, "sharp marker must decode"
+
+    # shifted + payload wiped: a FRESH detector must fail on it
+    # (precondition proving the cached detector's answer comes from tracking)
+    f2 = _marker_frame(48, 312, 208, hole=True)
+    assert 48 not in ArucoDetector().detect_all(f2), \
+        "precondition: wiped payload should defeat decoding"
+
+    m = det.detect_all(f2)
+    assert 48 in m, "LK fallback must bridge the dropout"
+    err = np.linalg.norm(m[48].center - (np.array([300 + 24, 200 + 24]) + [12, 8]))
+    assert err < 6, f"tracked center off by {err:.1f}px"
+
+
+def test_lk_tracking_expires():
+    """Without re-detection, the track must die after track_max_age frames."""
+    det = ArucoDetector(track_max_age=3)
+    det.detect_all(_marker_frame(48, 300, 200))
+    wiped = _marker_frame(48, 300, 200, hole=True)
+    seen = [48 in det.detect_all(wiped) for _ in range(6)]
+    assert seen[0], "first dropout frame should be bridged"
+    assert not seen[-1], "track must expire, not persist forever"
+
+
+def test_locate_by_aruco_prediction_gate():
+    """Detections implausibly far from the motion-model prediction are
+    rejected (the predicted_px/max_dist params were silently unused)."""
+    from perception import locate_by_aruco
+    frame = cv2.cvtColor(_marker_frame(48, 500, 300), cv2.COLOR_GRAY2BGR)
+    near = locate_by_aruco(frame, 48, predicted_px=np.array([520.0, 320.0]))
+    assert near is not None
+    far = locate_by_aruco(frame, 48, predicted_px=np.array([100.0, 100.0]),
+                          max_dist=120.0)
+    assert far is None

@@ -117,12 +117,24 @@ class CalibrationData:
 # ---------------------------------------------------------------------------
 
 class ArucoDetector:
-    """Wraps OpenCV ArUco detection with API compatibility for 4.7+ and older."""
+    """Wraps OpenCV ArUco detection with API compatibility for 4.7+ and older.
 
-    def __init__(self, dictionary_id=None):
+    Stateful: when a recently-seen marker fails to DECODE in the current
+    frame (18mm robot tags are ~12px at 640x480 -- right at the 4x4
+    decoding limit, so per-frame dropouts are inherent), its 4 corners are
+    carried forward by pyramidal Lucas-Kanade optical flow instead.
+    Tracking needs far less image detail than decoding, so this bridges
+    blur/tilt/glare dropout frames; a real re-detection re-anchors it, and
+    tracks expire after track_max_age frames so they can't drift forever.
+    """
+
+    def __init__(self, dictionary_id=None, track_max_age=8):
         if dictionary_id is None:
             dictionary_id = cv2.aruco.DICT_4X4_50
         self._dict_id = dictionary_id
+        self._track_max_age = track_max_age
+        self._prev_gray = None
+        self._last = {}  # marker_id -> dict(corners (4,2) float32, age int)
         # Try new API first (OpenCV 4.7+)
         try:
             self._dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
@@ -156,8 +168,10 @@ class ArucoDetector:
             self._new_api = False
 
     def detect(self, frame: np.ndarray) -> Tuple[list, np.ndarray, list]:
-        """Detect markers. Returns (corners, ids, rejected)."""
+        """Detect markers, with LK optical-flow fallback for recently-seen
+        markers that fail to decode this frame. Returns (corners, ids, rejected)."""
         h, w = frame.shape[:2]
+        gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         upscaled = cv2.resize(frame, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
         if self._new_api:
             corners, ids, rejected = self._detector.detectMarkers(upscaled)
@@ -168,7 +182,48 @@ class ArucoDetector:
             corners = [c / 2.0 for c in corners]
         if rejected is not None and len(rejected) > 0:
             rejected = [r / 2.0 for r in rejected]
-        return corners, ids, rejected
+
+        corners = list(corners) if corners is not None else []
+        ids_flat = [] if ids is None else [int(i) for i in ids.flatten()]
+
+        # refresh tracker state with real detections (age resets)
+        for i, mid in enumerate(ids_flat):
+            self._last[mid] = dict(corners=corners[i].reshape(4, 2).astype(np.float32),
+                                   age=0)
+
+        # LK fallback for markers seen recently but not decoded this frame
+        if self._prev_gray is not None and self._prev_gray.shape == gray.shape:
+            for mid in list(self._last):
+                st = self._last[mid]
+                if mid in ids_flat:
+                    continue
+                if st["age"] >= self._track_max_age:
+                    del self._last[mid]
+                    continue
+                p1, status, _ = cv2.calcOpticalFlowPyrLK(
+                    self._prev_gray, gray, st["corners"].reshape(-1, 1, 2), None,
+                    winSize=(21, 21), maxLevel=3)
+                ok = p1 is not None and status is not None and np.all(status == 1)
+                if ok:
+                    new_c = p1.reshape(4, 2).astype(np.float32)
+                    disp = np.linalg.norm(new_c - st["corners"], axis=1).max()
+                    area_old = cv2.contourArea(st["corners"])
+                    area_new = cv2.contourArea(new_c)
+                    # reject drifting/degenerate quads: per-frame marker motion
+                    # is bounded, and the quad's area can't change much
+                    ok = (disp < 60 and area_old > 1 and
+                          0.4 < area_new / area_old < 2.5)
+                if not ok:
+                    del self._last[mid]
+                    continue
+                st["corners"] = new_c
+                st["age"] += 1
+                corners.append(new_c.reshape(1, 4, 2))
+                ids_flat.append(mid)
+        self._prev_gray = gray
+
+        ids_out = np.array(ids_flat, dtype=np.int32).reshape(-1, 1) if ids_flat else None
+        return corners, ids_out, rejected
 
     def detect_all(self, frame: np.ndarray,
                    camera_matrix: np.ndarray = None,
