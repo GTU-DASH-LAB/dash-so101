@@ -591,28 +591,44 @@ def reset_arm():
 
 @app.route("/api/estop", methods=["POST"])
 def estop_arm():
-    emit_log("🚨 EMERGENCY STOP TRIGGERED! Disabling torques and disconnecting...")
-    state["episode_running"] = False
-    
+    emit_log("🚨 EMERGENCY STOP TRIGGERED!")
+
     if state["rig"] is not None:
         rig = state["rig"]
         cfg = state["cfg"]
-        
-        # Try to write Torque_Enable = 0 to Feetech motors directly
+
+        # Cooperative stop FIRST: the episode/reset/draw worker raises
+        # EStopped at its next rig call, releasing the serial bus. Writing
+        # torque-off from THIS thread while the worker is mid-sync_write
+        # fails with 'Port is in use!' (observed live) -- so signal, wait
+        # for the worker to bail out, THEN take the bus.
+        try:
+            rig.stop_event.set()
+        except AttributeError:
+            pass  # older rig without stop support
+        for _ in range(40):  # up to 2s; workers hit a rig call within ~1.5s
+            if not state["episode_running"]:
+                break
+            time.sleep(0.05)
+        if state["episode_running"]:
+            emit_log("Worker still busy after 2s -- disabling torque anyway.")
+
         try:
             for j in cfg.joints:
                 rig.robot.bus.write("Torque_Enable", 0, j)
             rig.robot.bus.write("Torque_Enable", 0, "gripper")
-        except Exception:
-            pass
-            
+            emit_log("Motor torques disabled.")
+        except Exception as e:
+            emit_log(f"Torque disable failed ({e}) -- disconnecting anyway.")
+
         try:
             rig.close()  # disconnects the serial port
         except Exception:
             pass
-            
+
         state["rig"] = None
-        
+
+    state["episode_running"] = False
     emit_log("🚨 Arm safety disabled and disconnected.")
     return jsonify({"status": "estopped"})
 
@@ -807,8 +823,12 @@ def run_episode_endpoint():
             state["J"] = res["J"]
             emit_log(f"Episode result: {res['reason']}")
         except Exception as e:
-            emit_log(f"Episode failed: {e}")
-            traceback.print_exc()
+            from run_real import EStopped
+            if isinstance(e, EStopped):
+                emit_log("Episode aborted by emergency stop.")
+            else:
+                emit_log(f"Episode failed: {e}")
+                traceback.print_exc()
         finally:
             state["episode_running"] = False
 

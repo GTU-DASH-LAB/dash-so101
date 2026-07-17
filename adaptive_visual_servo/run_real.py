@@ -44,10 +44,22 @@ from nanodet_detector import TABLETOP_CLASSES, NanodetDetector
 MAX_DISPLAY_W, MAX_DISPLAY_H = 480, 360  # scale the UI's video panel down for display only
 
 
+class EStopped(Exception):
+    """Raised from rig motion/IO calls after an emergency stop. Deliberately
+    NOT a RuntimeError: control.py catches RuntimeError for recoverable
+    failures (babble etc.) and would otherwise swallow the stop."""
+
+
 class SO101Rig:
     """rig interface in radians / [0,1] / BGR, converted to the bus's native
     degrees/0-100/RGB at this one boundary so ServoConfig's numbers mean the
-    same thing in sim and on hardware."""
+    same thing in sim and on hardware.
+
+    stop_event: set by the E-Stop endpoint (another thread). Every motor
+    command checks it FIRST and raises EStopped, so a running episode bails
+    out at its next command and releases the serial bus -- writing torque-off
+    from the E-Stop thread while this thread is mid-sync_write fails with
+    'Port is in use!' (observed live)."""
 
     def __init__(self, cfg: RealConfig):
         from lerobot.cameras.configs import ColorMode
@@ -75,12 +87,18 @@ class SO101Rig:
             time.sleep(1.0)
             self.robot.connect(calibrate=True)
         self._g = 1.0
+        self.stop_event = threading.Event()
 
     def close(self):
         self.robot.disconnect()
 
+    def _check_stop(self):
+        if self.stop_event.is_set():
+            raise EStopped("emergency stop")
+
     # ---- rig interface ----
     def get_q(self):
+        self._check_stop()
         pos = self.robot.bus.sync_read("Present_Position", list(self.cfg.joints))
         return np.radians([pos[j] for j in self.cfg.joints])
 
@@ -91,17 +109,19 @@ class SO101Rig:
         time.sleep(self.cfg.settle_floor_s + frac * self.cfg.settle_full_move_s)
 
     def set_q(self, q):
+        self._check_stop()
         c = self.cfg
         q = np.clip(q, np.radians(c.q_min_deg), np.radians(c.q_max_deg))
         deg_before = np.degrees(self.get_q())
         target_deg = np.degrees(q)
         max_diff = np.max(np.abs(target_deg - deg_before))
-        
+
         # Smoothly interpolate large movements (e.g. initial approaches or transitions)
         if max_diff > 1.5:
             # 1.0 degree per step max, run at ~30Hz
             steps = int(max(5, min(45, max_diff / 1.0)))
             for a in np.linspace(1.0/steps, 1.0, steps):
+                self._check_stop()  # abort long interpolations within ~33ms
                 interp_deg = deg_before + a * (target_deg - deg_before)
                 action = {f"{j}.pos": float(v) for j, v in zip(c.joints, interp_deg)}
                 self.robot.send_action(action)
@@ -112,6 +132,7 @@ class SO101Rig:
             self._settle(max_diff, c.max_step_deg)
 
     def set_q_raw(self, q):
+        self._check_stop()
         c = self.cfg
         q = np.clip(q, np.radians(c.q_min_deg), np.radians(c.q_max_deg))
         deg = np.degrees(q)
@@ -119,6 +140,7 @@ class SO101Rig:
         self.robot.send_action(action)
 
     def set_gripper(self, g):
+        self._check_stop()
         c = self.cfg
         g_before = self._g
         self._g = float(np.clip(g, 0.0, 1.0))
@@ -139,6 +161,7 @@ class SO101Rig:
         # measured +500 mid-travel on EMPTY AIR (same as the torque limit).
         # The signed-load check (closing/holding = positive on this arm)
         # confirms the jaw is actively pressing, not just parked.
+        self._check_stop()
         c = self.cfg
         if self._g >= 0.5:
             return False
