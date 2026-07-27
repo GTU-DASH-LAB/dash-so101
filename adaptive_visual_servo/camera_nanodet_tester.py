@@ -30,7 +30,7 @@ from PIL import Image, ImageTk
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from nanodet_detector import COCO_CLASSES, TABLETOP_CLASSES, NanodetDetector
 
-PROBE_RANGE = 10
+PROBE_RANGE = 3
 MAX_DISPLAY_W, MAX_DISPLAY_H = 480, 360  # scale down for display only; never upscale
 
 

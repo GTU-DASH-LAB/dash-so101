@@ -2,6 +2,7 @@
 
 import os
 import sys
+from dataclasses import replace
 
 import numpy as np
 
@@ -10,7 +11,7 @@ from config import ServoConfig, SimConfig
 from control import run_episode
 from sim import NominalModel, SimWorld
 
-SCFG = ServoConfig()
+SCFG = ServoConfig(fuse=False)  # explicit: baseline tests exercise the proven blink mode
 
 
 def _delivered(world):
@@ -92,9 +93,39 @@ def test_manual_target_and_pad():
         "object should land at the manually clicked drop point, not the color pad"
 
 
+def test_fused_batch():
+    """Fused tracking (encoder+vision fusion) must deliver at the same 85%
+    rate as blink mode -- the reject-gate and stall-detection fixes in
+    control.servo_to ensure this. Run the same seed range as test_randomized_batch."""
+    scfg_fused = replace(SCFG, fuse=True)
+    total = got = 0
+    fails = []
+    for seed in range(50, 62):
+        n = 1 + seed % 2
+        world = SimWorld(SimConfig(), seed=seed)
+        rng = np.random.default_rng(seed)
+        model = NominalModel(world.cfg, rng)
+        background = world.capture_background()
+        world.spawn_random(n)
+        J = None
+        for _ in range(n):
+            res = run_episode(world, model, scfg_fused, background, rng, J=J)
+            J = res["J"]
+        d = sum(np.hypot(o.pos[0] - world.pad[0], o.pos[1] - world.pad[1])
+                < world.cfg.pad_radius + 0.02 and not o.attached
+                for o in world.objects)
+        got += d
+        total += n
+        if d < n:
+            fails.append((seed, d, n))
+    rate = got / total
+    print(f"  fused batch: {got}/{total} delivered ({rate:.0%}); misses: {fails}")
+    assert rate >= 0.85, f"fused success rate {rate:.0%} below 85%: {fails}"
+
+
 if __name__ == "__main__":
     for fn in [test_single_object, test_randomized_batch, test_pick_by_color,
-               test_manual_target_and_pad]:
+               test_manual_target_and_pad, test_fused_batch]:
         fn()
         print(f"ok {fn.__name__}")
     print("ALL OK")

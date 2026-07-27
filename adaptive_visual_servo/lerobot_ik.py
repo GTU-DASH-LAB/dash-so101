@@ -51,3 +51,12 @@ class PlacoModel:
         q_deg_new = self.kin.inverse_kinematics(q_deg, T_target,
                                                 position_weight=1.0, orientation_weight=0.05)
         return np.radians(q_deg_new) - q
+
+    def solve_ik_xyz(self, q, xyz, orientation_weight=0.05):
+        """Solve for a full 3D target position (x, y, z), holding orientation."""
+        q_deg = np.degrees(q)
+        T_target = self.kin.forward_kinematics(q_deg)
+        T_target[:3, 3] = xyz
+        q_deg_new = self.kin.inverse_kinematics(q_deg, T_target,
+                                                position_weight=1.0, orientation_weight=orientation_weight)
+        return np.radians(q_deg_new)

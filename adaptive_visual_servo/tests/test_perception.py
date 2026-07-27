@@ -179,13 +179,50 @@ def test_filter_by_background_drops_arm_detection():
     assert np.linalg.norm(kept[0].center - obj_px) < 1e-9
 
 
+from perception import locate_by_marker
+
+def test_locate_by_marker():
+    import cv2
+    import numpy as np
+    
+    # Create blank black BGR frame
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    # Draw a green circle (representing a green tape marker) at (300, 200)
+    # Green color: HSV (60, 255, 255) -> BGR (0, 255, 0)
+    cv2.circle(frame, (300, 200), 5, (0, 255, 0), -1)
+    
+    # Detect marker with green hue (60)
+    px = locate_by_marker(frame, hue=60, tol=10, min_sat=100, min_val=100)
+    assert px is not None, "Failed to detect color marker"
+    assert np.linalg.norm(px - [300, 200]) < 2.0, f"Detected at wrong position: {px}"
+
+    # Verify prediction gating
+    px_gated = locate_by_marker(frame, hue=60, tol=10, min_sat=100, min_val=100,
+                                predicted_px=(295, 195), max_dist=15.0)
+    assert px_gated is not None, "Marker should be detected within search radius"
+    
+    px_gated_far = locate_by_marker(frame, hue=60, tol=10, min_sat=100, min_val=100,
+                                    predicted_px=(100, 100), max_dist=15.0)
+    assert px_gated_far is None, "Marker should be filtered out by search radius"
+
+
+def test_locate_by_aruco():
+    import cv2
+    from perception import locate_by_aruco
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    # Safe execute check
+    px = locate_by_aruco(frame, marker_id=0)
+    assert px is None or isinstance(px, np.ndarray)
+
+
 if __name__ == "__main__":
     for fn in [test_detect_objects_any_color, test_pad_and_hue_selection,
                test_blink_locate, test_locate_by_diff_tracks_carried_object,
                test_locate_by_diff_rejects_distant_distractor,
                test_diff_mask_ignores_global_exposure_shift,
                test_blink_sync_detection_rejects_noise_and_passersby,
-               test_filter_by_background_drops_arm_detection]:
+               test_filter_by_background_drops_arm_detection,
+               test_locate_by_marker, test_locate_by_aruco]:
         fn()
         print(f"ok {fn.__name__}")
     print("ALL OK")
