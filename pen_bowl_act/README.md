@@ -89,7 +89,43 @@ Measured on this machine (ACT, 640x480 wrist images, bf16):
 | 2 GPUs, lerobot's default DDP | 636 |
 | **2 GPUs, `train_act.py` (bf16 gradient sync)** | **798 (1.7x)** |
 
-`./2_train_local.sh` documentation follows with the training scripts.
+```bash
+./2_train_local.sh            # start; opens the live dashboard (http://127.0.0.1:8787)
+./2_train_local.sh status     # the same numbers in the terminal
+./2_train_local.sh stop       # stop; the newest checkpoint is kept
+./2_train_local.sh            # resume a stopped or crashed run
+./2_train_local.sh --fresh    # start over after changing config.env
+```
+
+- **Plan for this dataset (100 demos, 65,550 frames):** 90 training / 10 validation demos.
+  The batch is 64 per GPU × 2 = 128, which gives 455 steps per epoch. **60 epochs = 27,300
+  steps, about 75 minutes.** Validation runs every epoch, and a checkpoint is saved every 5.
+- The **dashboard** shows train loss and validation loss per epoch, progress, remaining time
+  and the finish time, GPU load, and every checkpoint with its validation loss.
+- Training runs **detached**, so closing the terminal is fine. If it crashes, the watchdog
+  resumes from the last checkpoint by itself.
+- Validation loss = action error on 10 demos the model never sees. If it rises while train
+  loss keeps falling, the model is over-fitting. That is a hint, not a verdict: in behaviour
+  cloning, lowest validation loss is only loosely tied to success on the robot. Try `best`
+  and `last` on the arm.
+- The run settings come from measurements on this machine; see the comments in
+  `config.env`. Recorded in h264, decoded with torchcodec, no CPU augmentation, bf16,
+  lr 1e-4. `train_act.py` sends gradients between the GPUs in bf16, which took 2-GPU
+  throughput from 636 to 798 samples/s.
+
+## Running the policy (step 3)
+
+```bash
+./3_run_autonomous.sh --list          # checkpoints, epoch, validation loss
+./3_run_autonomous.sh                 # newest checkpoint, until Ctrl+C
+./3_run_autonomous.sh best            # lowest validation loss
+./3_run_autonomous.sh --trials 10     # 10 timed attempts; the arm returns home in between
+```
+
+Put the follower in your demo start pose first. Each joint moves at most 5° per tick
+(`MAX_RELATIVE_TARGET`). Actions use ACT's temporal ensembling (`ACTION_MODE=ensemble`,
+smooth, re-plans every tick). `ACTION_MODE=chunk` is the alternative if motion is too
+hesitant. Ctrl+C returns the arm to where it started before the motors relax.
 
 ## Tests
 
