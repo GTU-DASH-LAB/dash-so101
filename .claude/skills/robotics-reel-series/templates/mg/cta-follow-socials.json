@@ -1,0 +1,110 @@
+{
+  "name": "CTA — follow socials (bottom)",
+  "description": "End-card follow buttons: Instagram, LinkedIn, GitHub (me), GitHub (lab) in a 2x2 grid under a FOLLOW FOR DAY 2 headline.",
+  "width": 960,
+  "height": 380,
+  "durationInFrames": 105,
+  "properties": [
+    {
+      "key": "follow",
+      "label": "Follow text",
+      "type": "text",
+      "defaultValue": "FOLLOW FOR DAY 2"
+    },
+    {
+      "key": "igLabel",
+      "label": "Instagram label",
+      "type": "text",
+      "defaultValue": "INSTAGRAM"
+    },
+    {
+      "key": "igHandle",
+      "label": "Instagram handle",
+      "type": "text",
+      "defaultValue": "@engineer__fouad"
+    },
+    {
+      "key": "liLabel",
+      "label": "LinkedIn label",
+      "type": "text",
+      "defaultValue": "LINKEDIN"
+    },
+    {
+      "key": "liHandle",
+      "label": "LinkedIn handle",
+      "type": "text",
+      "defaultValue": "in/fouad-aladhami"
+    },
+    {
+      "key": "gh1Label",
+      "label": "GitHub 1 label",
+      "type": "text",
+      "defaultValue": "GITHUB · ME"
+    },
+    {
+      "key": "gh1",
+      "label": "GitHub 1",
+      "type": "text",
+      "defaultValue": "fouad1233"
+    },
+    {
+      "key": "gh2Label",
+      "label": "GitHub 2 label",
+      "type": "text",
+      "defaultValue": "GITHUB · OUR LAB"
+    },
+    {
+      "key": "gh2",
+      "label": "GitHub 2",
+      "type": "text",
+      "defaultValue": "GTU-DASH-LAB"
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Navy",
+      "type": "color",
+      "defaultValue": "#070B24"
+    },
+    {
+      "key": "headFont",
+      "label": "Headline font",
+      "type": "font",
+      "defaultValue": "Anton"
+    },
+    {
+      "key": "bodyFont",
+      "label": "Body font",
+      "type": "font",
+      "defaultValue": "Space Grotesk"
+    },
+    {
+      "key": "monoFont",
+      "label": "Mono font",
+      "type": "font",
+      "defaultValue": "JetBrains Mono"
+    }
+  ],
+  "role": "End card: FOLLOW FOR DAY N+1 + 2x2 buttons Instagram/LinkedIn/GitHub/Lab",
+  "day1Placement": {
+    "track": "V4 overlays",
+    "left": 40,
+    "top": 1150,
+    "width": 960,
+    "height": 380,
+    "fromFrame": 1814,
+    "durationInFrames": 105,
+    "zone": "bottom, y1150-1500 (above IG username area, left of IG action rail); move last captions to top=1030"
+  }
+}

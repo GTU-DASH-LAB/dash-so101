@@ -22,9 +22,21 @@ Learning/experiments with the **SO-101** robotic arms and Vision-Language-Action
   bowl". Camera config keys are pi0's own names directly (`base_0_rgb`/
   `left_wrist_0_rgb`), not `top`/`wrist` — no `--rename_map` needed anywhere in
   this folder's scripts, unlike `ball_pickup_pi0`.
+- `tshirt_fold_pi05/` — fine-tune **pi0.5 via LoRA** on SO-101 demos of "fold the
+  tshirt" (one-handed). Training-only folder: the dataset was recorded through
+  the lelab web UI, not this project's own `1_record.sh`, so there is no record
+  script or ports/cameras block in its `config.env`. Needs `--rename_map`
+  (lelab named the cameras `workspace_cam`/`wrist_camera`). See the pi0.5
+  section below — its memory requirements are nothing like pi0's.
 - `pencil_pickup_vla/` — earlier task: SmolVLA fine-tuned on Kaggle for pencil
   pickup.
 - `daily_progress/` — dated diary (`day1.md`, `day2.md`, …), English + Türkçe.
+- `.claude/skills/robotics-reel-series/` — project skill for the "Day N of making
+  robotics videos until I get recognized" Instagram/LinkedIn reel series: ChatCut
+  MCP edit recipes, design system, motion-graphic templates, music/dataset/export
+  scripts, social-copy templates and the episode log (`references/episodes.md` —
+  append each delivered episode). A personal copy also lives in
+  `~/.claude/skills/robotics-reel-series/`; keep the two in sync.
 - `.venv/` — Python 3.12 virtualenv (git-ignored). Activate with
   `source .venv/bin/activate`; install with `pip install -e "./lerobot[feetech]"`.
 
@@ -219,3 +231,96 @@ is the single source of truth — in particular the cameras block must be
   `batch_size=8` (~2 samples/sec) at essentially the same per-step wall-clock
   time. Memory dropped fully back to baseline after the process exited —
   clean, no orphaned workers observed in this test.
+
+### `tshirt_fold_pi05` — pi0.5 LoRA on the 2x RTX 5090 workstation
+
+**The memory numbers everywhere else in this file are from a different
+machine.** The `ball_pickup_pi0`/`cap_sort_pi0` sections describe a GB10 box
+with **121GB unified** CPU+GPU memory, where `nvidia-smi` reports `N/A` and you
+track usage with `free -h`. This folder was built on the GTU workstation: **two
+discrete RTX 5090s, 32,607 MiB VRAM each**, no NVLink, no P2P, GPU1 on a
+narrower x4 PCIe link. Nothing about 78GB/113GB/`free -h` transfers. Re-measure.
+
+- **pi0.5 does NOT fit in 32GB with the obvious settings.** LoRA r=16 gives
+  1,287,168 learnable params of 4,144,691,984 total — and still OOMs at
+  batch_size=8. Two flags fix it and both are required:
+  `--policy.dtype=bfloat16 --policy.gradient_checkpointing=true`.
+  - fp32 + `ACCELERATE_MIXED_PRECISION=bf16`, bs=8 → ~31GB, OOM at weight load.
+  - `dtype=bfloat16` alone, bs=8 → ~31GB, OOM *inside the gemma MLP forward*.
+    bf16 freed the ~8GB it should have; activations expanded to fill it.
+  - both flags, bs=8 → **13.5GB/card**, 0.96 s/step, 17 smp/s.
+  - both flags, bs=16 → **16.4GB/card (50%)**, 1.96 s/step, 16 smp/s. ← in use
+- **Why:** LoRA makes the *optimizer* cheap, not the *model*. The adapters sit
+  inside the frozen transformer, so backprop still traverses every layer and
+  every layer's activations stay resident. At ~760 tokens/sample (2x256 image +
+  200 text + 50 action) x 18 gemma layers that is ~21GB at bs=8. "Only 1.3M
+  trainable params" reads like it should fit anywhere. It does not.
+- `PI05Config.dtype` → `PaliGemmaWithExpertModel(precision=...)` →
+  `to_bfloat16_for_selected_params()` (`modeling_pi05.py:406`), which casts the
+  transformer to bf16 but **deliberately keeps** `vision_tower`,
+  `multi_modal_projector`, the layernorms and `model.norm` in fp32. It is not a
+  blunt `.half()`; this mirrors upstream openpi.
+- **Set `ACCELERATE_MIXED_PRECISION=no` when using `--policy.dtype=bfloat16`.**
+  Leaving autocast on re-casts the vision path the model just kept in fp32 and
+  caches a duplicate bf16 copy of every weight — i.e. it reintroduces the OOM.
+  (`--policy.use_amp` remains a validated no-op, as noted for pi0 above.)
+- pi0.5's gradient checkpointing uses `use_reentrant=False`
+  (`modeling_pi05.py:509,545`), which is the variant that still propagates
+  gradients when the checkpointed block's own inputs are frozen — exactly the
+  LoRA case. The old reentrant variant would silently produce zero gradients.
+- Step time scales **linearly** with batch size while samples/s stays flat: the
+  GPUs are compute-bound, not batch-starved. A bigger batch buys data-per-step,
+  not throughput. Corollary: 2-GPU DDP is a real ~2x here (one GPU at the same
+  effective batch of 32 would need ~3.9 s/step), which is why this folder
+  deviates from `robotics/CLAUDE.md` rule #5. That rule assumes billions of
+  gradients crossing PCIe; LoRA sends 1.28M.
+- Trains in **lelab's uv tool venv**, not `../.venv` — see `config.env` for the
+  full reasoning (a fresh venv needs ~3GB of wheels on a per-connection-throttled
+  network). `<lelab>/bin/pip` does not exist; use
+  `uv pip install --python <lelab>/bin/python`. **Do not `uv tool upgrade lelab`
+  while a run is in flight** — it reverts the local patches and drops
+  peft/matplotlib.
+- The 14.47GB `pi05_base` checkpoint lives at `~/models/pi05_base` (a plain
+  directory, not the HF cache). HF's downloader stalled and restarted from zero
+  repeatedly on this network; `aria2c -c -x16 -s16` fetched it at 3.9 MiB/s.
+- `torchcodec` prints ~10 `OSError: libavutil.so.NN` tracebacks per rank at
+  startup. **Benign** — it probes each FFmpeg version, fails, and lelab's patch
+  falls back to PyAV. `--dataset.video_backend=pyav` is passed explicitly anyway.
+- Unattended runs: `./start_training.sh` (detached watchdog + 6-hourly email
+  monitor), `./stop_training.sh`. `./smoke_test.sh <bs> [gpus] [steps]` runs real
+  steps and reports peak per-card VRAM — use it before changing batch size.
+
+#### Rollout (`3_run_autonomous.sh`) — findings from bringing it up
+
+- **The C505 workspace camera needs `warmup_s: 3` in the cameras block.**
+  `OpenCVCamera.connect()` warms up via `async_read(timeout_ms=warmup_s * 1000)`
+  (`camera_opencv.py:173`) and `warmup_s` **defaults to 1**. The C505 measurably
+  takes ~1.8s to produce its FIRST frame from cold, so connect dies with
+  `Timed out waiting for frame ... after 1000 ms`. Once open it holds 29.9 fps,
+  and both cameras together sustain 25.7 fps with no fourcc override — the
+  "separate USB hubs" bandwidth rule above is satisfied here. `warmup_s` changes
+  no pixels, so the policy still sees its training distribution.
+- **Calibration is looked up by `SOFollower.name` (`so_follower`), NOT by the
+  registered `--robot.type` string (`so101_follower`).** So the file lives at
+  `calibration/robots/so_follower/dash_so101.json`, and looking under
+  `calibration/robots/so101_follower/` finds nothing and looks alarming. Resolve
+  the real path with `SOFollower(cfg).calibration_fpath` before concluding a
+  robot is uncalibrated.
+- `lerobot.robots` has **no `so101_follower` subpackage** — the module is
+  `so_follower`, which registers *both* `so101_follower` and `so100_follower`
+  via `@RobotConfig.register_subclass`. `RobotConfig.get_known_choices()` returns
+  `[]` until something triggers the lazy import, so an empty list is not proof a
+  type is missing.
+- **The follower port is pinned by USB serial, not by `ttyACMN`.** `config.env`
+  carries `FOLLOWER_SERIAL` and the run script resolves `/dev/serial/by-id/*`
+  back to the node, aborting on a mismatch rather than driving the leader arm.
+  This is not hypothetical: the arms re-enumerated *during* the recording
+  session (lelab config written 13:06, replug at 14:17, recording ended 15:46).
+- Verifying a LoRA checkpoint: load it the way `rollout/context.py:190-198`
+  does — `PeftConfig.from_pretrained(ckpt)` → `policy_cls.from_pretrained(
+  peft_config.base_model_name_or_path)` → `PeftModel.from_pretrained(policy,
+  ckpt)`. Pointing `from_pretrained` at the adapter directory itself instead
+  prints `Returning model without loading pretrained weights` and silently
+  yields a **randomly initialized** model with zero LoRA tensors. Good check:
+  all 76 LoRA tensors non-zero (the `B` matrices init to zero, so non-zero
+  proves the trained adapter actually loaded), totalling 1,287,168 params.

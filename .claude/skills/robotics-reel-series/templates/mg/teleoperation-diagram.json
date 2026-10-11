@@ -1,0 +1,86 @@
+{
+  "name": "Teleoperation diagram",
+  "description": "TELEOPERATION chip + leader arm -> signal pulses -> follower arm diagram.",
+  "width": 1000,
+  "height": 420,
+  "durationInFrames": 257,
+  "properties": [
+    {
+      "key": "title",
+      "label": "Title",
+      "type": "text",
+      "defaultValue": "TELEOPERATION"
+    },
+    {
+      "key": "leader",
+      "label": "Leader label",
+      "type": "text",
+      "defaultValue": "LEADER ARM"
+    },
+    {
+      "key": "leaderSub",
+      "label": "Leader sub",
+      "type": "text",
+      "defaultValue": "I move this one"
+    },
+    {
+      "key": "follower",
+      "label": "Follower label",
+      "type": "text",
+      "defaultValue": "FOLLOWER ARM"
+    },
+    {
+      "key": "followerSub",
+      "label": "Follower sub",
+      "type": "text",
+      "defaultValue": "copies me live"
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Navy",
+      "type": "color",
+      "defaultValue": "#070B24"
+    },
+    {
+      "key": "headFont",
+      "label": "Headline font",
+      "type": "font",
+      "defaultValue": "Anton"
+    },
+    {
+      "key": "bodyFont",
+      "label": "Body font",
+      "type": "font",
+      "defaultValue": "Space Grotesk"
+    },
+    {
+      "key": "monoFont",
+      "label": "Mono font",
+      "type": "font",
+      "defaultValue": "JetBrains Mono"
+    }
+  ],
+  "role": "Leader arm -> signal pulses -> follower arm",
+  "day1Placement": {
+    "track": "V4 overlays",
+    "left": 60,
+    "top": 1300,
+    "width": 900,
+    "height": 378,
+    "fromFrame": 403,
+    "durationInFrames": 257,
+    "zone": "below captions, over teleop B-roll (action in top 58%)"
+  }
+}

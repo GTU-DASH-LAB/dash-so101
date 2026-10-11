@@ -1,0 +1,98 @@
+{
+  "name": "Dataset counter — 100 demos",
+  "description": "HUD panel over the demo montage: counts 0->100 DEMONSTRATIONS, then reveals 2 hours + 65,550 frames chips.",
+  "width": 920,
+  "height": 660,
+  "durationInFrames": 215,
+  "properties": [
+    {
+      "key": "label",
+      "label": "Label",
+      "type": "text",
+      "defaultValue": "MY DATASET"
+    },
+    {
+      "key": "target",
+      "label": "Count to",
+      "type": "number",
+      "defaultValue": 100
+    },
+    {
+      "key": "unit",
+      "label": "Unit",
+      "type": "text",
+      "defaultValue": "DEMONSTRATIONS"
+    },
+    {
+      "key": "chip1",
+      "label": "Chip 1",
+      "type": "text",
+      "defaultValue": "≈ 2 HOURS"
+    },
+    {
+      "key": "chip2",
+      "label": "Chip 2",
+      "type": "text",
+      "defaultValue": "65,550 FRAMES"
+    },
+    {
+      "key": "foot",
+      "label": "Footnote",
+      "type": "text",
+      "defaultValue": "all recorded by teleoperation · 30 fps"
+    },
+    {
+      "key": "revealAt",
+      "label": "Chips reveal frame",
+      "type": "number",
+      "defaultValue": 104
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Navy",
+      "type": "color",
+      "defaultValue": "#070B24"
+    },
+    {
+      "key": "headFont",
+      "label": "Headline font",
+      "type": "font",
+      "defaultValue": "Anton"
+    },
+    {
+      "key": "bodyFont",
+      "label": "Body font",
+      "type": "font",
+      "defaultValue": "Space Grotesk"
+    },
+    {
+      "key": "monoFont",
+      "label": "Mono font",
+      "type": "font",
+      "defaultValue": "JetBrains Mono"
+    }
+  ],
+  "role": "HUD counter 0->N demonstrations + hours/frames chips",
+  "day1Placement": {
+    "track": "V4 overlays",
+    "left": 80,
+    "top": 380,
+    "width": 920,
+    "height": 660,
+    "fromFrame": 660,
+    "durationInFrames": 215,
+    "zone": "centre, over demo-grid B-roll"
+  }
+}

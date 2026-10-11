@@ -1,0 +1,68 @@
+{
+  "name": "Name tag — Fouad Aladhami",
+  "description": "Lower-third identity card: name, degree, university with red/blue accent bar.",
+  "width": 900,
+  "height": 230,
+  "durationInFrames": 151,
+  "properties": [
+    {
+      "key": "name",
+      "label": "Name",
+      "type": "text",
+      "defaultValue": "FOUAD ALADHAMI"
+    },
+    {
+      "key": "role",
+      "label": "Role",
+      "type": "text",
+      "defaultValue": "MSc in AI · Computer Engineering"
+    },
+    {
+      "key": "org",
+      "label": "Organization",
+      "type": "text",
+      "defaultValue": "Gebze Technical University"
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Navy",
+      "type": "color",
+      "defaultValue": "#070B24"
+    },
+    {
+      "key": "nameFont",
+      "label": "Name font",
+      "type": "font",
+      "defaultValue": "Space Grotesk"
+    },
+    {
+      "key": "monoFont",
+      "label": "Label font",
+      "type": "font",
+      "defaultValue": "JetBrains Mono"
+    }
+  ],
+  "role": "Identity lower-third: name / degree / university",
+  "day1Placement": {
+    "track": "V4 overlays",
+    "left": 40,
+    "top": 1320,
+    "width": 900,
+    "height": 230,
+    "fromFrame": 149,
+    "durationInFrames": 151,
+    "zone": "lower third"
+  }
+}

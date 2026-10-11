@@ -1,0 +1,134 @@
+{
+  "name": "ACT explainer — full screen",
+  "description": "Full-frame explainer: ACT = Action Chunking Transformer; wrist cam + joints -> transformer -> chunk of 100 actions; training stats + real loss curve. Leaves caption band 1130-1310 empty; wrist-cam video sits in the input box (100,420,360x270) on a track above.",
+  "width": 1080,
+  "height": 1920,
+  "durationInFrames": 160,
+  "properties": [
+    {
+      "key": "title",
+      "label": "Title",
+      "type": "text",
+      "defaultValue": "ACT"
+    },
+    {
+      "key": "subtitle",
+      "label": "Subtitle",
+      "type": "text",
+      "defaultValue": "ACTION CHUNKING TRANSFORMER"
+    },
+    {
+      "key": "inLine1",
+      "label": "Input line 1",
+      "type": "text",
+      "defaultValue": "1 wrist camera"
+    },
+    {
+      "key": "inLine2",
+      "label": "Input line 2",
+      "type": "text",
+      "defaultValue": "+ 6 joint angles"
+    },
+    {
+      "key": "inLine3",
+      "label": "Input line 3",
+      "type": "text",
+      "defaultValue": "640×480 · 30 fps"
+    },
+    {
+      "key": "core",
+      "label": "Core block",
+      "type": "text",
+      "defaultValue": "TRANSFORMER"
+    },
+    {
+      "key": "coreSub",
+      "label": "Core sub",
+      "type": "text",
+      "defaultValue": "encoder–decoder · CVAE"
+    },
+    {
+      "key": "outLabel",
+      "label": "Output label",
+      "type": "text",
+      "defaultValue": "OUTPUT · NEXT 100 ACTIONS AT ONCE"
+    },
+    {
+      "key": "trainLabel",
+      "label": "Training label",
+      "type": "text",
+      "defaultValue": "TRAINING ON 2× RTX 5090"
+    },
+    {
+      "key": "stat1",
+      "label": "Stat 1",
+      "type": "text",
+      "defaultValue": "60 EPOCHS"
+    },
+    {
+      "key": "stat2",
+      "label": "Stat 2",
+      "type": "text",
+      "defaultValue": "~800 SAMPLES/S"
+    },
+    {
+      "key": "lossLabel",
+      "label": "Loss label",
+      "type": "text",
+      "defaultValue": "LOSS 12.6 → 0.09"
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Background",
+      "type": "color",
+      "defaultValue": "#060A1F"
+    },
+    {
+      "key": "transparentBackground",
+      "label": "Transparent background",
+      "type": "boolean",
+      "defaultValue": false
+    },
+    {
+      "key": "headFont",
+      "label": "Headline font",
+      "type": "font",
+      "defaultValue": "Anton"
+    },
+    {
+      "key": "bodyFont",
+      "label": "Body font",
+      "type": "font",
+      "defaultValue": "Space Grotesk"
+    },
+    {
+      "key": "monoFont",
+      "label": "Mono font",
+      "type": "font",
+      "defaultValue": "JetBrains Mono"
+    }
+  ],
+  "role": "Model explainer: inputs -> transformer -> action chunk, training stats, real loss curve",
+  "day1Placement": {
+    "track": "V4 overlays",
+    "left": 0,
+    "top": 0,
+    "width": 1080,
+    "height": 1920,
+    "fromFrame": 875,
+    "durationInFrames": 160,
+    "zone": "full frame; caption band 1130-1310 kept empty; wrist video placed at (96,416,368x276) on V5"
+  }
+}
