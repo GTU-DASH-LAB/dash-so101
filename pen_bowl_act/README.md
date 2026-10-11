@@ -19,6 +19,7 @@ cd ~/robotics/dash-so101/pen_bowl_act
 | 1 | `./manage_data.sh` | Progress, review videos, delete bad demos/sessions, undo |
 | 1b | `./1b_publish_dataset.sh` | Merge all sessions, verify every demo, push to the HF Hub |
 | 2 | `./2_train_local.sh` | Train ACT on both GPUs with a live loss/ETA dashboard |
+| 2b | `./2b_publish_model.sh` | Push a trained checkpoint + model card to the HF Hub |
 | 3 | `./3_run_autonomous.sh` | Run the trained policy on the arm |
 
 Every script checks the hardware first, read-only. It finds the leader and follower
@@ -113,6 +114,20 @@ Measured on this machine (ACT, 640x480 wrist images, bf16):
   lr 1e-4. `train_act.py` sends gradients between the GPUs in bf16, which took 2-GPU
   throughput from 636 to 798 samples/s.
 
+## Publishing the model (step 2b)
+
+```bash
+./2b_publish_model.sh --dry-run       # build the upload in run/model_upload/, read README.md there
+./2b_publish_model.sh                 # newest checkpoint -> https://huggingface.co/fouad1233/act_pen_in_bowl_wrist
+./2b_publish_model.sh best            # or the lowest-validation-loss one, or a name from --list
+```
+
+The upload is the checkpoint's weights and pre/post-processors plus a model card: task,
+inputs, training settings, every checkpoint's validation loss, the loss curve, and a
+ready-to-run `lerobot-rollout` command. The pushed checkpoint becomes the repo's main
+version and is tagged `step-NNNNNN`, so a later push of another checkpoint keeps it.
+`MODEL_PRIVATE` in `config.env` makes the repo private.
+
 ## Running the policy (step 3)
 
 ```bash
@@ -120,6 +135,7 @@ Measured on this machine (ACT, 640x480 wrist images, bf16):
 ./3_run_autonomous.sh                 # newest checkpoint, until Ctrl+C
 ./3_run_autonomous.sh best            # lowest validation loss
 ./3_run_autonomous.sh --trials 10     # 10 timed attempts; the arm returns home in between
+./3_run_autonomous.sh hub             # the published model, downloaded from the Hub
 ```
 
 Put the follower in your demo start pose first. Each joint moves at most 5° per tick

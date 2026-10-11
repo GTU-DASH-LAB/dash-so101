@@ -5,6 +5,7 @@
 #   ./3_run_autonomous.sh                 newest checkpoint, runs until Ctrl+C
 #   ./3_run_autonomous.sh best            checkpoint with the lowest validation loss
 #   ./3_run_autonomous.sh 013830          a specific checkpoint (names: --list)
+#   ./3_run_autonomous.sh hub             the model published by ./2b_publish_model.sh
 #   ./3_run_autonomous.sh --list          checkpoints with their epoch and val loss
 #   ./3_run_autonomous.sh --trials 10 [checkpoint]
 #        10 timed attempts of TRIAL_TIME_S each. Between attempts the arm returns
@@ -29,7 +30,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --list) exec "$PY" train_dashboard.py --status ;;
     --trials) TRIALS="${2:?--trials needs a number}"; shift 2 ;;
-    -h|--help) sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '3,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) CKPT="$1"; shift ;;
   esac
 done
@@ -39,8 +40,12 @@ if [ "$CKPT" = "best" ]; then
   CKPT=$("$PY" -c 'import train_dashboard as t; b=[c for c in t.collect()["checkpoints"] if c.get("best")]; print(b[0]["name"] if b else "")')
   [ -n "$CKPT" ] || die "No checkpoint has a validation loss yet. Use 'last' or a name from --list."
 fi
-POLICY="$CK_ROOT/$CKPT/pretrained_model"
-[ -f "$POLICY/config.json" ] || die "No checkpoint '$CKPT'. Available: $(ls "$CK_ROOT" 2>/dev/null | tr '\n' ' ')"
+if [ "$CKPT" = "hub" ]; then
+  POLICY="$MODEL_REPO"
+else
+  POLICY="$CK_ROOT/$CKPT/pretrained_model"
+  [ -f "$POLICY/config.json" ] || die "No checkpoint '$CKPT'. Available: $(ls "$CK_ROOT" 2>/dev/null | tr '\n' ' ')"
+fi
 recorder_running && die "A recording is running. Only one program can drive the arm."
 rollout_running && die "Another ./3_run_autonomous.sh is already running."
 
@@ -72,7 +77,7 @@ info "Actions: $MODE_TXT, max $MAX_RELATIVE_TARGET deg/tick per joint"
 warn "The arm will move by itself in a few seconds. Hand near the power switch. Ctrl+C stops."
 echo
 
-export HF_HUB_OFFLINE=1
+[ "$POLICY" = "$MODEL_REPO" ] || export HF_HUB_OFFLINE=1
 if [ "$TRIALS" -gt 0 ]; then
   STAMP=$(date +%Y%m%d_%H%M%S)
   ROOT="$RUN_DIR/rollouts/$STAMP"
