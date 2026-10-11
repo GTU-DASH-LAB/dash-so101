@@ -1,0 +1,116 @@
+{
+  "name": "Two-camera problem — full screen",
+  "description": "Full-frame explainer: before = 2 cameras (wrist + external); external camera rotates at turnAt; TASK FAILED stamp at failAt. Caption band 1130-1310 left empty.",
+  "width": 1080,
+  "height": 1920,
+  "durationInFrames": 201,
+  "properties": [
+    {
+      "key": "title",
+      "label": "Title",
+      "type": "text",
+      "defaultValue": "WHY ONLY ONE?"
+    },
+    {
+      "key": "label",
+      "label": "Scene label",
+      "type": "text",
+      "defaultValue": "BEFORE · 2 CAMERAS"
+    },
+    {
+      "key": "fuse",
+      "label": "Fuse line",
+      "type": "text",
+      "defaultValue": "it learns 3D by fusing BOTH views"
+    },
+    {
+      "key": "turnText",
+      "label": "Turn label",
+      "type": "text",
+      "defaultValue": "move the 2nd camera…"
+    },
+    {
+      "key": "stamp",
+      "label": "Stamp",
+      "type": "text",
+      "defaultValue": "TASK FAILED"
+    },
+    {
+      "key": "lesson1",
+      "label": "Lesson 1",
+      "type": "text",
+      "defaultValue": "MOVE ONE CAMERA"
+    },
+    {
+      "key": "lesson2",
+      "label": "Lesson 2",
+      "type": "text",
+      "defaultValue": "THE POLICY BREAKS"
+    },
+    {
+      "key": "turnAt",
+      "label": "Turn at frame",
+      "type": "number",
+      "defaultValue": 91
+    },
+    {
+      "key": "failAt",
+      "label": "Fail at frame",
+      "type": "number",
+      "defaultValue": 146
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Background",
+      "type": "color",
+      "defaultValue": "#060A1F"
+    },
+    {
+      "key": "transparentBackground",
+      "label": "Transparent background",
+      "type": "boolean",
+      "defaultValue": false
+    },
+    {
+      "key": "headFont",
+      "label": "Headline font",
+      "type": "font",
+      "defaultValue": "Anton"
+    },
+    {
+      "key": "bodyFont",
+      "label": "Body font",
+      "type": "font",
+      "defaultValue": "Space Grotesk"
+    },
+    {
+      "key": "monoFont",
+      "label": "Mono font",
+      "type": "font",
+      "defaultValue": "JetBrains Mono"
+    }
+  ],
+  "role": "Problem explainer with animated diagram + TASK FAILED stamp (turnAt/failAt frame props)",
+  "day1Placement": {
+    "track": "V4 overlays",
+    "left": 0,
+    "top": 0,
+    "width": 1080,
+    "height": 1920,
+    "fromFrame": 1207,
+    "durationInFrames": 201,
+    "zone": "full frame; caption band empty"
+  }
+}

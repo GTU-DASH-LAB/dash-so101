@@ -1,0 +1,35 @@
+{
+  "name": "Cinematic vignette",
+  "description": "Full-frame transparent vignette + soft top/bottom shade for a lens-like, professional look.",
+  "width": 1080,
+  "height": 1920,
+  "durationInFrames": 1919,
+  "properties": [
+    {
+      "key": "strength",
+      "label": "Vignette strength",
+      "type": "number",
+      "defaultValue": 0.5,
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    {
+      "key": "shade",
+      "label": "Edge color",
+      "type": "color",
+      "defaultValue": "#03040C"
+    }
+  ],
+  "role": "Lens vignette + soft top/bottom shade for a pro-camera look",
+  "day1Placement": {
+    "track": "V3 (above B-roll, below graphics)",
+    "left": 0,
+    "top": 0,
+    "width": 1080,
+    "height": 1920,
+    "fromFrame": 0,
+    "durationInFrames": "whole timeline",
+    "zone": "full frame"
+  }
+}

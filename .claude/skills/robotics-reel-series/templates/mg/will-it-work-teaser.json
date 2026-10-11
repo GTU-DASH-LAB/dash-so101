@@ -1,0 +1,62 @@
+{
+  "name": "Will it work? — teaser",
+  "description": "Lower overlay: WILL IT WORK? chip + \"results in Part 2\" line.",
+  "width": 900,
+  "height": 240,
+  "durationInFrames": 82,
+  "properties": [
+    {
+      "key": "title",
+      "label": "Title",
+      "type": "text",
+      "defaultValue": "WILL IT WORK?"
+    },
+    {
+      "key": "sub",
+      "label": "Sub",
+      "type": "text",
+      "defaultValue": "real-robot results in PART 2"
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Navy",
+      "type": "color",
+      "defaultValue": "#070B24"
+    },
+    {
+      "key": "headFont",
+      "label": "Headline font",
+      "type": "font",
+      "defaultValue": "Anton"
+    },
+    {
+      "key": "monoFont",
+      "label": "Mono font",
+      "type": "font",
+      "defaultValue": "JetBrains Mono"
+    }
+  ],
+  "role": "Cliffhanger chip + 'results in DAY N+1' mono line",
+  "day1Placement": {
+    "track": "V4 overlays",
+    "left": 40,
+    "top": 1320,
+    "width": 900,
+    "height": 240,
+    "fromFrame": 1732,
+    "durationInFrames": 82,
+    "zone": "lower third"
+  }
+}

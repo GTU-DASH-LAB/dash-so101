@@ -1,0 +1,80 @@
+{
+  "name": "Idea card — one camera enough?",
+  "description": "Lower overlay: THE IDEA chip + \"for a simple task... ONE CAMERA IS ENOUGH?\"",
+  "width": 940,
+  "height": 290,
+  "durationInFrames": 234,
+  "properties": [
+    {
+      "key": "chip",
+      "label": "Chip",
+      "type": "text",
+      "defaultValue": "THE IDEA"
+    },
+    {
+      "key": "line1",
+      "label": "Line 1",
+      "type": "text",
+      "defaultValue": "For a simple task…"
+    },
+    {
+      "key": "hl",
+      "label": "Highlight",
+      "type": "text",
+      "defaultValue": "ONE CAMERA"
+    },
+    {
+      "key": "rest",
+      "label": "Rest",
+      "type": "text",
+      "defaultValue": "SHOULD BE ENOUGH"
+    },
+    {
+      "key": "hlAt",
+      "label": "Highlight frame",
+      "type": "number",
+      "defaultValue": 150
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Navy",
+      "type": "color",
+      "defaultValue": "#070B24"
+    },
+    {
+      "key": "headFont",
+      "label": "Headline font",
+      "type": "font",
+      "defaultValue": "Anton"
+    },
+    {
+      "key": "bodyFont",
+      "label": "Body font",
+      "type": "font",
+      "defaultValue": "Space Grotesk"
+    }
+  ],
+  "role": "THE IDEA chip + one-line hypothesis with highlighted phrase (hlAt frame prop)",
+  "day1Placement": {
+    "track": "V4 overlays",
+    "left": 40,
+    "top": 1320,
+    "width": 940,
+    "height": 290,
+    "fromFrame": 1408,
+    "durationInFrames": 234,
+    "zone": "lower third"
+  }
+}

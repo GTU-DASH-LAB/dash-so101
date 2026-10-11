@@ -1,0 +1,62 @@
+{
+  "name": "Badge — only 1 camera",
+  "description": "Lower-left badge: ONLY 1 CAMERA chip + camera icon + \"mounted on the gripper\".",
+  "width": 620,
+  "height": 250,
+  "durationInFrames": 103,
+  "properties": [
+    {
+      "key": "chip",
+      "label": "Chip",
+      "type": "text",
+      "defaultValue": "ONLY 1 CAMERA"
+    },
+    {
+      "key": "sub",
+      "label": "Sub",
+      "type": "text",
+      "defaultValue": "mounted on the gripper"
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Navy",
+      "type": "color",
+      "defaultValue": "#070B24"
+    },
+    {
+      "key": "headFont",
+      "label": "Headline font",
+      "type": "font",
+      "defaultValue": "Anton"
+    },
+    {
+      "key": "monoFont",
+      "label": "Mono font",
+      "type": "font",
+      "defaultValue": "JetBrains Mono"
+    }
+  ],
+  "role": "Punchy key-fact badge: icon + chip + mono subline",
+  "day1Placement": {
+    "track": "V4 overlays",
+    "left": 40,
+    "top": 1320,
+    "width": 620,
+    "height": 250,
+    "fromFrame": 1064,
+    "durationInFrames": 103,
+    "zone": "lower-left"
+  }
+}

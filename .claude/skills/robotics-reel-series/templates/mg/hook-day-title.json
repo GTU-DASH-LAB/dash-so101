@@ -1,0 +1,74 @@
+{
+  "name": "Hook — Day 1 title",
+  "description": "Opening hook: stacked kinetic chips \"DAY 1 / ROBOTICS VIDEOS / UNTIL I GET RECOGNIZED\" with REC label.",
+  "width": 1000,
+  "height": 620,
+  "durationInFrames": 142,
+  "properties": [
+    {
+      "key": "label",
+      "label": "Top label",
+      "type": "text",
+      "defaultValue": "ROBOTICS SERIES · EP.01"
+    },
+    {
+      "key": "title",
+      "label": "Big title",
+      "type": "text",
+      "defaultValue": "DAY 1"
+    },
+    {
+      "key": "line1",
+      "label": "Line 1",
+      "type": "text",
+      "defaultValue": "ROBOTICS VIDEOS"
+    },
+    {
+      "key": "line2",
+      "label": "Line 2",
+      "type": "text",
+      "defaultValue": "UNTIL I GET RECOGNIZED"
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Navy",
+      "type": "color",
+      "defaultValue": "#070B24"
+    },
+    {
+      "key": "headFont",
+      "label": "Headline font",
+      "type": "font",
+      "defaultValue": "Anton"
+    },
+    {
+      "key": "monoFont",
+      "label": "Label font",
+      "type": "font",
+      "defaultValue": "JetBrains Mono"
+    }
+  ],
+  "role": "Hook title: series label + DAY N + 2 subtitle chips",
+  "day1Placement": {
+    "track": "V4 overlays",
+    "left": 40,
+    "top": 112,
+    "width": 1000,
+    "height": 620,
+    "fromFrame": 0,
+    "durationInFrames": 142,
+    "zone": "top band y112-410, must stay ABOVE the robot arm"
+  }
+}

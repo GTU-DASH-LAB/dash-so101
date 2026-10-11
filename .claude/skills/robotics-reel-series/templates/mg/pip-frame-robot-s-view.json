@@ -1,0 +1,50 @@
+{
+  "name": "PiP frame — robot's view",
+  "description": "HUD frame with label tab for a 444x333 picture-in-picture video placed underneath at local (8,63).",
+  "width": 460,
+  "height": 404,
+  "durationInFrames": 92,
+  "properties": [
+    {
+      "key": "label",
+      "label": "Label",
+      "type": "text",
+      "defaultValue": "ROBOT'S VIEW"
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Navy",
+      "type": "color",
+      "defaultValue": "#070B24"
+    },
+    {
+      "key": "monoFont",
+      "label": "Mono font",
+      "type": "font",
+      "defaultValue": "JetBrains Mono"
+    }
+  ],
+  "role": "HUD frame around a PiP video (video on V2 at 657,184,377x283, radius 20)",
+  "day1Placement": {
+    "track": "V5 top overlays",
+    "left": 650,
+    "top": 130,
+    "width": 391,
+    "height": 343,
+    "fromFrame": 1075,
+    "durationInFrames": 92,
+    "zone": "top-right (clear of face)"
+  }
+}

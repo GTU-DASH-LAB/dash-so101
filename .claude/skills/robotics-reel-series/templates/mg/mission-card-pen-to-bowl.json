@@ -1,0 +1,68 @@
+{
+  "name": "Mission card — pen to bowl",
+  "description": "Top overlay: MISSION chip + pen icon -> animated arrow -> bowl icon.",
+  "width": 980,
+  "height": 340,
+  "durationInFrames": 158,
+  "properties": [
+    {
+      "key": "chip",
+      "label": "Chip",
+      "type": "text",
+      "defaultValue": "THE MISSION"
+    },
+    {
+      "key": "step1",
+      "label": "Step 1",
+      "type": "text",
+      "defaultValue": "PICK UP THE PEN"
+    },
+    {
+      "key": "step2",
+      "label": "Step 2",
+      "type": "text",
+      "defaultValue": "DROP IT IN THE BOWL"
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Navy",
+      "type": "color",
+      "defaultValue": "#070B24"
+    },
+    {
+      "key": "headFont",
+      "label": "Headline font",
+      "type": "font",
+      "defaultValue": "Anton"
+    },
+    {
+      "key": "bodyFont",
+      "label": "Body font",
+      "type": "font",
+      "defaultValue": "Space Grotesk"
+    }
+  ],
+  "role": "Task statement: chip + step1 icon -> arrow -> step2 icon",
+  "day1Placement": {
+    "track": "V5 top overlays",
+    "left": 50,
+    "top": 170,
+    "width": 980,
+    "height": 340,
+    "fromFrame": 245,
+    "durationInFrames": 158,
+    "zone": "top band"
+  }
+}

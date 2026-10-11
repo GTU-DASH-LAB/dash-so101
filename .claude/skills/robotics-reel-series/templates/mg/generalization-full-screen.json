@@ -1,0 +1,86 @@
+{
+  "name": "Generalization — full screen",
+  "description": "Full-frame beat: GENERALIZE MORE? title, framed slot for wrist-cam video at (180,430,720x540), \"camera rides on the gripper -> same view anywhere\". Caption band 1130-1310 empty.",
+  "width": 1080,
+  "height": 1920,
+  "durationInFrames": 90,
+  "properties": [
+    {
+      "key": "title",
+      "label": "Title",
+      "type": "text",
+      "defaultValue": "GENERALIZE MORE?"
+    },
+    {
+      "key": "tab",
+      "label": "Frame tab",
+      "type": "text",
+      "defaultValue": "ROBOT'S VIEW"
+    },
+    {
+      "key": "line1",
+      "label": "Line 1",
+      "type": "text",
+      "defaultValue": "the camera rides WITH the gripper"
+    },
+    {
+      "key": "line2",
+      "label": "Line 2",
+      "type": "text",
+      "defaultValue": "SAME VIEW · ANYWHERE"
+    },
+    {
+      "key": "red",
+      "label": "Red",
+      "type": "color",
+      "defaultValue": "#FF2D55"
+    },
+    {
+      "key": "blue",
+      "label": "Blue",
+      "type": "color",
+      "defaultValue": "#2F6BFF"
+    },
+    {
+      "key": "navy",
+      "label": "Background",
+      "type": "color",
+      "defaultValue": "#060A1F"
+    },
+    {
+      "key": "transparentBackground",
+      "label": "Transparent background",
+      "type": "boolean",
+      "defaultValue": false
+    },
+    {
+      "key": "headFont",
+      "label": "Headline font",
+      "type": "font",
+      "defaultValue": "Anton"
+    },
+    {
+      "key": "bodyFont",
+      "label": "Body font",
+      "type": "font",
+      "defaultValue": "Space Grotesk"
+    },
+    {
+      "key": "monoFont",
+      "label": "Mono font",
+      "type": "font",
+      "defaultValue": "JetBrains Mono"
+    }
+  ],
+  "role": "Benefit beat: big question title + framed robot view + 2 lines",
+  "day1Placement": {
+    "track": "V4 overlays",
+    "left": 0,
+    "top": 0,
+    "width": 1080,
+    "height": 1920,
+    "fromFrame": 1642,
+    "durationInFrames": 90,
+    "zone": "full frame; framed slot for wrist video at (180,436,720x540) on V5"
+  }
+}
