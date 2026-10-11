@@ -1,0 +1,7 @@
+# Runtime artifacts of a training run (same idea as pen_bowl_act/run/)
+outputs/
+*.pid
+*.log
+monitor_t0
+loss_history.jsonl
+loss_curve.png

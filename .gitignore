@@ -26,3 +26,6 @@ so_brain/episodic_memory.jsonl
 so_brain/last_before.png
 so_brain/last_after.png
 so_brain/last_plan.png
+
+# Raw/edited reel footage (large; kept local, never pushed)
+videos_for_editing/
