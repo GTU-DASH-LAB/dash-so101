@@ -3,3 +3,5 @@ setup_env.log
 aws_setup.log
 aws_probe.log
 aws_train.log
+init_policy/
+run/

@@ -60,7 +60,15 @@ def main() -> int:
         setattr(cfg, k, v)
     cfg.device = a.device
     t0 = time.time()
-    policy = get_policy_class(cfg.type).from_pretrained(a.policy, config=cfg).to(a.device).eval()
+    cls = get_policy_class(cfg.type)
+    if getattr(cfg, "use_peft", False):  # LoRA checkpoint: base weights + adapter, as lerobot-rollout loads it
+        from peft import PeftConfig, PeftModel
+
+        pc = PeftConfig.from_pretrained(a.policy)
+        policy = PeftModel.from_pretrained(cls.from_pretrained(pc.base_model_name_or_path, config=cfg), a.policy, config=pc)
+    else:
+        policy = cls.from_pretrained(a.policy, config=cfg)
+    policy = policy.to(a.device).eval()
     pre, post = make_pre_post_processors(cfg, pretrained_path=a.policy,
                                          preprocessor_overrides={"device_processor": {"device": a.device}})
     print(f"loaded {cfg.type} in {time.time() - t0:.0f} s")
