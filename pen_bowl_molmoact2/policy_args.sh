@@ -11,6 +11,8 @@ POLICY_ARGS=(
   --policy.chunk_size="$CHUNK_SIZE" --policy.n_action_steps="$N_ACTION_STEPS"
   --policy.model_dtype=bfloat16 --policy.gradient_checkpointing=true
   --policy.enable_lora_vlm=true
+  --policy.normalize_gripper=true     # as in the SO-100/101 pretraining (norm_stats.json)
+  --policy.discrete_action_tokenizer="$HOME/models/molmoact2/MolmoAct2-FAST-Tokenizer"
   --policy.image_keys='["observation.images.wrist"]'
   --policy.norm_tag="$NORM_TAG" --policy.setup_type="$SETUP_TYPE" --policy.control_mode="$CONTROL_MODE"
   --dataset.repo_id="$MODEL_FRAME_DATASET_REPO" --dataset.root="$MODEL_FRAME_DATASET_ROOT"
