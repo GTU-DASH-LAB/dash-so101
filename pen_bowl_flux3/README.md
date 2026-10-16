@@ -47,3 +47,11 @@ from on AWS (`/home/ubuntu/work/init_policy`). `deploy_config.py` makes a copy t
 
 Offline check without the arm: `../tools/offline_check.py --policy run/deploy/<step> ...`
 (run under `~/envs/lerobot-main`, `HF_HUB_OFFLINE=1`).
+
+Inference on the RTX 5090 (`init_policy`, the base before fine-tuning, offline from the cache):
+26.3 GB peak, 668 ms per 32-action chunk; on 20 held-out frames the next 15 actions are 3.69 deg
+off the human's (holding still: 3.01).
+
+**LoRA training also fits on one RTX 5090** (measured, 4 real steps of `lora.json`): batch 1,
+no accumulation, 29.9 GB peak of 32.6, 0.41 s/step, 137M learnable parameters. The upstream
+single-GPU budget (batch 2 x 10k microsteps = 20k samples) would take ~2.5 h here at batch 1.
