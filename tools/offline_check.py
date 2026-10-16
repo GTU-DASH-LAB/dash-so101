@@ -90,13 +90,14 @@ def main() -> int:
             obs.update({k: v for k, v in ds[int(d)].items() if k.startswith("observation.images.")})
         obs["task"] = item["task"]
         policy.reset()
+        pre.reset()  # stateful processors (FLUX 3's command history) start fresh, as at an episode start
+        post.reset()
         preds = []
         with torch.inference_mode():
-            batch = pre(obs)
-            for k in range(H):
-                sync()
+            for k in range(H):  # one control tick each, exactly as lerobot-rollout runs it (the observation
+                sync()          # stays frame i's: the policy's action queue ignores later ones anyway)
                 t = time.time()
-                act = post(policy.select_action(batch))
+                act = post(policy.select_action(pre(dict(obs))))
                 sync()
                 if k == 0:
                     lat.append(time.time() - t)
