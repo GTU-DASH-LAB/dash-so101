@@ -42,6 +42,11 @@ if [ "$CKPT" = "best" ]; then
 fi
 if [ "$CKPT" = "hub" ]; then
   POLICY="$MODEL_REPO"            # published with the joint transform already ON
+  # The published processors name the base by its Hub id, and MolmoAct2's input processor
+  # snapshot-downloads it (21.8 GB) - --policy.checkpoint_path below only reaches the model.
+  warn "hub: first use downloads allenai/MolmoAct2-SO100_101 (21.8 GB). The local checkpoint"
+  warn "that was published is the same model: ./3_run_autonomous.sh <its step> (see --list)."
+  confirm "Continue with the Hub model?" || exit 1
 else
   SRC="$CK_ROOT/$CKPT/pretrained_model"
   [ -f "$SRC/config.json" ] || die "No checkpoint '$CKPT'. Available: $(ls "$CK_ROOT" 2>/dev/null | tr '\n' ' ')"

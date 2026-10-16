@@ -10,8 +10,8 @@ pre/post-processor steps (the processors are loaded from their own JSON, not fro
   preprocessor:  state_model  = sign * state_arm + offset     (before normalizing)
   postprocessor: action_arm   = (action_model - offset) / sign (after unnormalizing)
 
-Weights are hard-linked, not copied. --hub-base also points checkpoint_path at the Hub id of
-the base model instead of this machine's local download (for publishing).
+Weights are hard-linked, not copied. --hub-base also points checkpoint_path and the FAST action
+tokenizer at their Hub ids instead of this machine's local downloads (for publishing).
 """
 
 import json
@@ -42,6 +42,7 @@ def main() -> int:
     cfg["joint_signs"], cfg["joint_offsets"] = [float(x) for x in signs], [float(x) for x in offsets]
     if "--hub-base" in sys.argv:
         cfg["checkpoint_path"] = os.environ.get("BASE_CHECKPOINT_HUB", "allenai/MolmoAct2-SO100_101")
+        cfg["discrete_action_tokenizer"] = "allenai/MolmoAct2-FAST-Tokenizer"
     (out / "config.json").write_text(json.dumps(cfg, indent=2))
 
     touched = 0
@@ -57,6 +58,8 @@ def main() -> int:
                 touched += 1
             if "--hub-base" in sys.argv and "checkpoint_path" in c:
                 c["checkpoint_path"] = cfg["checkpoint_path"]
+            if "--hub-base" in sys.argv and "discrete_action_tokenizer" in c:
+                c["discrete_action_tokenizer"] = cfg["discrete_action_tokenizer"]
         p.write_text(json.dumps(pipe, indent=2))
     if touched != 2:
         print(f"Expected 2 frame-transform steps (state in, action out), found {touched}", file=sys.stderr)
