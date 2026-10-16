@@ -102,6 +102,21 @@ is the single source of truth — in particular the cameras block must be
   `lerobot-record` episode-boundary beeps (`play_sounds`) won't be audible
   unless a monitor with built-in speakers is connected over HDMI.
 
+### Dataset statistics: recorded quantiles are episode-averaged (QUANTILES policies)
+
+- The `meta/stats.json` lerobot writes at recording time holds q01..q99 that are
+  **averages of per-episode quantiles**, not quantiles over all frames. On
+  `so101_pen_in_bowl_wrist` wrist_roll q01..q99 = 58..103 while the frames span
+  11..146 (true q01..q99 = 21..130); 12-25% of every joint's frames fall outside.
+- Harmless for MEAN_STD / MIN_MAX policies (ACT, VLA-JEPA). **Harmful for QUANTILES
+  policies that clamp** — MolmoAct2 normalizes with q01/q99 and clamps state and
+  action to [-1, 1], so its first pen_bowl run could not command or see a large part
+  of the workspace (wrist_roll predictions pinned at 58.2/102.8). Fixed in
+  `pen_bowl_molmoact2/make_model_frame_dataset.py` (global quantiles). Check this
+  before training any QUANTILES-normalized policy (pi0.5 also uses QUANTILES).
+- Diagnose with `tools/offline_check.py --save out.npz`: predictions that saturate at
+  the same value on several frames are clamping, not learning.
+
 ### `ball_pickup_pi0` training (GB10, 121GB **unified** CPU+GPU memory)
 
 - pi0 is ~4B learnable params. `--policy.device=cuda`.

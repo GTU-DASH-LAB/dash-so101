@@ -15,6 +15,14 @@ switched ON only for deployment (deploy_config.py): robot state -> model frame i
 actions -> arm frame out.
 
 Videos are shared via a symlink (unchanged); only parquet and meta are rewritten (~3 MB).
+
+Quantiles are recomputed over ALL frames. The dataset's own stats.json (written by lerobot at
+recording time) holds per-episode quantiles averaged over episodes: for wrist_roll q01..q99 =
+58..103 although the frames span 11..146 (global q01..q99 = 21..130). MolmoAct2 normalizes
+state and action with q01/q99 and CLAMPS to [-1, 1], so with the averaged values 12-25% of
+the frames of every joint (70% of frames on some joint) were clipped: the policy could not
+command, or even see, a large part of the workspace. Measured on the first run: wrist_roll
+predictions stuck at 58.2 / 102.8 while the human went to 23 and 139.
 """
 
 import json
@@ -70,7 +78,6 @@ def main() -> int:
     stats = json.loads((src / "meta" / "stats.json").read_text())
     for k in KEYS:
         stats[k] = transform_stats(stats[k], s, o)
-    (dst / "meta" / "stats.json").write_text(json.dumps(stats, indent=2))
 
     # Per-episode stats live as columns "stats/<key>/<stat>" in meta/episodes.
     for p in sorted((src / "meta" / "episodes").rglob("*.parquet")):
@@ -91,17 +98,29 @@ def main() -> int:
         pq.write_table(t, out)
 
     n_frames = 0
+    frames = {k: [] for k in KEYS}
     for p in sorted((src / "data").rglob("*.parquet")):
         t = pq.read_table(p)
         for k in KEYS:
             arr = np.stack(t.column(k).to_numpy(zero_copy_only=False))
             new = transform_values(arr, s, o).astype(np.float32)
+            frames[k].append(new)
             t = t.set_column(t.column_names.index(k), k,
                              pa.array(list(new), type=t.schema.field(k).type))
         out = dst / p.relative_to(src)
         out.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(t, out)
         n_frames += t.num_rows
+
+    old = {k: (stats[k]["q01"], stats[k]["q99"]) for k in KEYS}
+    for k in KEYS:  # global quantiles over all frames (see the module docstring)
+        x = np.concatenate(frames[k]).astype(np.float64)
+        for qk in QPAIRS:
+            stats[k][qk] = np.quantile(x, int(qk[1:]) / 100, axis=0).tolist()
+        clipped = ((x < np.asarray(old[k][0])) | (x > np.asarray(old[k][1]))).mean(0)
+        print(f"  {k}: frames outside the recorded (episode-averaged) q01..q99 per joint: "
+              f"{[f'{100 * c:.0f}%' for c in clipped]} -> global quantiles")
+    (dst / "meta" / "stats.json").write_text(json.dumps(stats, indent=2))
 
     q = stats["observation.state"]
     print(f"Model-frame dataset: {dst} ({n_frames} frames)")

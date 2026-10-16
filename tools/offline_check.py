@@ -5,6 +5,7 @@
                      [--repo-id ID] [--episodes 90-99] [--frames 60] [--horizon 15] [--device cuda]
                      [--set key=value ...]   policy config overrides, e.g. checkpoint_path=...
                      [--swap-images]         give each frame the camera images of ANOTHER frame
+                     [--save out.npz]        per-frame predictions, targets and states for analysis
 
 Loads the policy and its saved pre/post-processors with STOCK lerobot (none of the training
 launchers' patches), feeds single frames from held-out episodes of the ORIGINAL dataset (arm
@@ -44,6 +45,7 @@ def main() -> int:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--set", action="append", default=[])
     ap.add_argument("--swap-images", action="store_true")
+    ap.add_argument("--save")
     a = ap.parse_args()
 
     lo, hi = (int(x) for x in a.episodes.split("-"))
@@ -80,7 +82,7 @@ def main() -> int:
     idx = sorted(rng.choice(ok, size=min(a.frames, len(ok)), replace=False).tolist())
     donor = np.roll(idx, len(idx) // 2) if a.swap_images else idx
     sync = torch.cuda.synchronize if a.device.startswith("cuda") else (lambda: None)
-    err, freeze, lat = [], [], []
+    err, freeze, lat, P, G, S = [], [], [], [], [], []
     for i, d in zip(idx, donor):
         item = ds[i]
         obs = {k: v for k, v in item.items() if k.startswith("observation.") and not k.endswith("_is_pad")}
@@ -100,9 +102,12 @@ def main() -> int:
                     lat.append(time.time() - t)
                 preds.append(act.squeeze(0).float().cpu().numpy())
         gt = np.stack([ds[i + k]["action"].numpy() for k in range(H)])
+        P.append(np.stack(preds)); G.append(gt); S.append(item["observation.state"].numpy())
         err.append(np.abs(np.stack(preds) - gt))                       # [H, D]
         freeze.append(np.abs(item["observation.state"].numpy()[None] - gt))
     err, freeze = np.stack(err), np.stack(freeze)                       # [N, H, D]
+    if a.save:
+        np.savez(a.save, pred=np.stack(P), gt=np.stack(G), state=np.stack(S), frames=np.array(idx), names=np.array(names))
     print(f"{len(idx)} held-out frames (episodes {a.episodes}){' with SWAPPED images' if a.swap_images else ''}; next {H} actions ({H / ds.fps:.2f} s) vs the human's")
     print(f"{'joint':<18}{'policy MAE':>11}{'freeze MAE':>11}{'policy @t+H':>12}{'freeze @t+H':>12}")
     for j, n in enumerate(names):
