@@ -7,6 +7,11 @@
 #   ./3_run_autonomous.sh 013830          a specific checkpoint (names: --list)
 #   ./3_run_autonomous.sh hub             the model published by ./2b_publish_model.sh
 #   ./3_run_autonomous.sh --list          checkpoints with their epoch and val loss
+#   ./3_run_autonomous.sh --rtc [checkpoint]
+#        Real-Time Chunking: the next chunk is computed in a background thread while
+#        the arm keeps executing the current one, and blended into it. Without it
+#        the arm pauses ~0.13 s at every chunk boundary while MolmoAct2 thinks (the
+#        "Record loop is running slower (7.5 Hz)" warning is that one slow tick).
 #   ./3_run_autonomous.sh --trials 10 [checkpoint]
 #        10 timed attempts of TRIAL_TIME_S each. Between attempts the arm returns
 #        to its start pose and you get TRIAL_RESET_S to put the pen somewhere new.
@@ -25,12 +30,14 @@ set -uo pipefail
 source "$(dirname "$0")/lib.sh"
 
 TRIALS=0
+RTC=false
 CKPT=last
 while [ $# -gt 0 ]; do
   case "$1" in
     --list) exec "$PY" train_dashboard.py --status ;;
     --trials) TRIALS="${2:?--trials needs a number}"; shift 2 ;;
-    -h|--help) sed -n '3,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --rtc) RTC=true; shift ;;
+    -h|--help) sed -n '3,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) CKPT="$1"; shift ;;
   esac
 done
@@ -64,8 +71,16 @@ grep -v '^PORTS ' "$RUN_DIR/hw_check.out"
 [ $rc -eq 0 ] || die "Hardware check failed - fix the FAIL lines above and run again."
 FOLLOWER_PORT="$(sed -n 's/^PORTS.*follower=\([^ ]*\).*/\1/p' "$RUN_DIR/hw_check.out")"
 
-MODE_ARGS=(--policy.n_action_steps="$N_ACTION_STEPS")
-MODE_TXT="executes $N_ACTION_STEPS of each $CHUNK_SIZE predicted actions, then predicts again"
+if [ "$RTC" = true ]; then
+  # A new chunk is started when RTC_QUEUE_THRESHOLD actions are left; it takes ~9 ticks
+  # (284 ms with RTC guidance, measured on the 5090), so the threshold must stay above that.
+  MODE_ARGS=(--inference.type=rtc --inference.queue_threshold="$RTC_QUEUE_THRESHOLD"
+             --inference.rtc.execution_horizon="$RTC_EXECUTION_HORIZON")
+  MODE_TXT="RTC: next chunk computed in the background when $RTC_QUEUE_THRESHOLD of $CHUNK_SIZE actions are left"
+else
+  MODE_ARGS=(--policy.n_action_steps="$N_ACTION_STEPS")
+  MODE_TXT="executes $N_ACTION_STEPS of each $CHUNK_SIZE predicted actions, then predicts again"
+fi
 # The policy rebuilds itself from the base checkpoint first; use the local download
 # (a published model names the Hub id, which would mean another 21.8 GB download).
 MODE_ARGS+=(--policy.checkpoint_path="$BASE_CHECKPOINT")
