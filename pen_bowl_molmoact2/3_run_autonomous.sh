@@ -87,8 +87,8 @@ if [ "$RTC" = true ]; then
 else
   MODE_ARGS=(--policy.n_action_steps="$N_ACTION_STEPS")
   # MolmoAct2 replaces n_action_steps with its checkpoint metadata (30), so every run so far
-  # executed the whole chunk whatever N_ACTION_STEPS says (rollout_trt.py reports this).
-  MODE_TXT="executes the whole $CHUNK_SIZE-action chunk, then predicts again (MolmoAct2 ignores N_ACTION_STEPS=$N_ACTION_STEPS)"
+  # executed the whole chunk; config.env now says 30 to match (rollout_trt.py reports it).
+  MODE_TXT="executes the whole $CHUNK_SIZE-action chunk, then predicts again"
 fi
 # The policy rebuilds itself from the base checkpoint first; use the local download
 # (a published model names the Hub id, which would mean another 21.8 GB download).
