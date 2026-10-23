@@ -339,3 +339,20 @@ narrower x4 PCIe link. Nothing about 78GB/113GB/`free -h` transfers. Re-measure.
   yields a **randomly initialized** model with zero LoRA tensors. Good check:
   all 76 LoRA tensors non-zero (the `B` matrices init to zero, so non-zero
   proves the trained adapter actually loaded), totalling 1,287,168 params.
+
+### `tools/trt` — TensorRT inference (`3_run_autonomous.sh --trt`)
+
+- `pen_bowl_act` and `pen_bowl_molmoact2` take `--trt`: same `lerobot-rollout`, launched via
+  `tools/trt/rollout_trt.py`, which swaps in a TensorRT engine (whole ACT net in fp16; MolmoAct2's
+  action expert, one engine per flow step) after the policy loads and before the robot connects.
+  Engines are cached in `~/.cache/dash_so101_trt`, keyed by a hash of the weights. Measurements and
+  the parity numbers are in `tools/trt/README.md`. Re-check them with `bench_inference.py --compare`
+  after any change.
+- **Use ONNX → `trt.OnnxParser`, not torch_tensorrt.** torch_tensorrt 2.11's SDPA converter returns
+  wrong values whenever `attn_mask` is passed, and its MolmoAct2-expert graphs hit Myelin internal
+  errors on sm_120.
+- **MolmoAct2 ignores `--policy.n_action_steps`.** Its `__init__` overwrites it with the base
+  checkpoint metadata (30), so every non-RTC run executed whole 30-action chunks, whatever
+  `N_ACTION_STEPS` in `config.env` says. `rollout_trt.py --trt-n-action-steps N` really sets it.
+- Under `--rtc` the MolmoAct2 expert stays in PyTorch, because RTC guidance backpropagates through it.
+- LoRA (`use_peft`) checkpoints are not covered.
