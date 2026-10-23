@@ -69,10 +69,9 @@ def _fast_sync_get_action(engine, policy):
     engine.get_action = get_action
 
 
-def main():
-    precision = _pop_opt("--trt-act-precision", "fp16")
-    n_steps = _pop_opt("--trt-n-action-steps")
-
+def install(precision="fp16", n_steps=None):
+    """Patch lerobot so build_rollout_context loads the policy with TensorRT. Returns the patched
+    build_rollout_context (also installed as lerobot_rollout.build_rollout_context)."""
     import lerobot.rollout.context as C
     from lerobot.rollout.inference.factory import RTCInferenceConfig
     from lerobot.rollout.inference.sync import SyncInferenceEngine
@@ -132,6 +131,13 @@ def main():
 
     C.get_policy_class = get_policy_class
     LR.build_rollout_context = build
+    return build
+
+
+def main():
+    install(_pop_opt("--trt-act-precision", "fp16"), _pop_opt("--trt-n-action-steps"))
+    from lerobot.scripts import lerobot_rollout as LR
+
     LR.main()
 
 
