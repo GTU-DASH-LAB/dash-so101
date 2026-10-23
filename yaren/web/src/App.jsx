@@ -37,6 +37,8 @@ export default function App() {
   const [camKey, setCamKey] = useState(0);
   const [camOk, setCamOk] = useState(true);
   const [recOpen, setRecOpen] = useState(false);
+  const [memOpen, setMemOpen] = useState(false);
+  const [memVersion, setMemVersion] = useState(0);
 
   const ws = useRef(null);
   const mic = useRef(null);
@@ -98,6 +100,7 @@ export default function App() {
       case "run_end": push({ role: "event", kind: "run_end", ...ev }); break;
       case "done_check": push({ role: "event", kind: "done_check", ...ev }); break;
       case "look": push({ role: "event", kind: "look", camera: ev.camera }); break;
+      case "memory": setMemVersion((v) => v + 1); break;
       case "llm_stats":
         setPerf((p) => ({ ...p, first: ev.first_sentence_ms ?? p.first,
           tps: ev.eval_count && ev.eval_duration ? Math.round(ev.eval_count / (ev.eval_duration / 1e9)) : p.tps }));
@@ -284,6 +287,7 @@ export default function App() {
                 <button className="ghost" onClick={() => setRecOpen(true)}>⏺ {t.record}</button>
               </div>
             </label>
+            <button className="ghost mem-btn" onClick={() => setMemOpen(true)}>🧠 {t.memory}</button>
             <label className="check"><input type="checkbox" checked={settings.bargeIn} onChange={(e) => updateSettings({ bargeIn: e.target.checked })} /> {t.bargeIn}</label>
             <label className="check"><input type="checkbox" checked={settings.speak} onChange={(e) => updateSettings({ speak: e.target.checked })} /> {t.speak}</label>
           </div>
@@ -337,6 +341,7 @@ export default function App() {
         </section>
       </main>
 
+      {memOpen && <MemoryPanel t={t} version={memVersion} onClose={() => setMemOpen(false)} />}
       {recOpen && (
         <Recorder t={t} mic={mic.current} onClose={() => setRecOpen(false)}
           onSaved={(vid, list) => { setVoices(list); updateSettings({ voice: vid }); setRecOpen(false); }} />
@@ -362,8 +367,9 @@ function Message({ m, t }) {
   if (m.role === "user") return <div className="msg user"><div className="bubble">{m.text}</div></div>;
   if (m.role === "assistant") return <div className="msg bot"><img src="/yaren.svg" alt="" /><div className="bubble">{m.text}</div></div>;
   if (m.role === "tool") {
-    const icon = { do_task: "🦾", stop_robot: "■", go_home: "⌂", look: "👁", robot_status: "ℹ" }[m.name] || "⚙";
-    const detail = m.name === "do_task" ? `“${m.args?.instruction}”${m.result?.trained_skill === false ? " · untrained" : ""}` : "";
+    const icon = { do_task: "🦾", stop_robot: "■", go_home: "⌂", look: "👁", robot_status: "ℹ", remember: "🧠", forget: "🗑" }[m.name] || "⚙";
+    const detail = m.name === "do_task" ? `“${m.args?.instruction}”${m.result?.trained_skill === false ? " · untrained" : ""}`
+      : m.name === "remember" ? `“${m.args?.fact}”` : m.name === "forget" ? `“${m.result?.forgotten ?? m.args?.id}”` : "";
     const err = m.result?.error ? ` · ${m.result.error}` : "";
     return <div className="msg tool">{icon} {m.name} {detail}{err}</div>;
   }
@@ -372,6 +378,58 @@ function Message({ m, t }) {
   if (m.kind === "look") return <div className="msg event faint">👁 {m.camera}</div>;
   if (m.kind === "error") return <div className="msg event err">⚠ {m.text}</div>;
   return null;
+}
+
+function MemoryPanel({ t, version, onClose }) {
+  const [mem, setMem] = useState(null);
+  const [err, setErr] = useState("");
+  const call = useCallback(async (method, path) => {
+    try {
+      const r = await fetch(path, { method, headers: { "x-yaren-token": TOKEN } });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || r.statusText);
+      setMem(j); setErr("");
+    } catch (e) { setErr(String(e.message || e)); }
+  }, []);
+  useEffect(() => { call("GET", "/api/memory"); }, [call, version]);
+
+  const group = (about, title) => {
+    const list = (mem?.entries || []).filter((e) => e.about === about);
+    const [used, limit] = mem?.usage?.[about] || [0, 1];
+    return (
+      <div className="mem-group">
+        <div className="mem-head"><b>{title}</b><span className="mem-usage"><i style={{ width: `${Math.min(100, (100 * used) / limit)}%` }} /></span><small>{used}/{limit}</small></div>
+        {list.length ? list.map((e) => (
+          <div key={e.id} className="mem-entry">
+            <span>{e.fact}</span>
+            <button className="ghost" title={t.memForget} onClick={() => call("DELETE", `/api/memory/${e.id}`)}>✕</button>
+          </div>
+        )) : <div className="mem-empty">{t.memEmpty}</div>}
+      </div>
+    );
+  };
+  const runs = [...(mem?.runs || [])].reverse().slice(0, 10);
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="card mem-card" onClick={(e) => e.stopPropagation()}>
+        <h3>🧠 {t.memTitle}</h3>
+        <p className="hint">{t.memHint}</p>
+        {err && <p className="warn">{err}</p>}
+        {group("person", t.memPeople)}
+        {group("yaren", t.memNotes)}
+        <div className="mem-group">
+          <div className="mem-head"><b>{mem?.dry ? t.memDryRuns : t.memRuns}</b></div>
+          {runs.length ? runs.map((r) => (
+            <div key={r.at} className="mem-run">
+              <small>{new Date(r.at * 1000).toLocaleString(t.locale, { dateStyle: "medium", timeStyle: "short" })}</small>
+              <span>{r.task} — {t.ended[r.ended] || r.ended} ({r.seconds} s)</span>
+            </div>
+          )) : <div className="mem-empty">{t.memEmpty}</div>}
+        </div>
+        <button className="ghost" onClick={onClose}>{t.close}</button>
+      </div>
+    </div>
+  );
 }
 
 function Recorder({ t, mic, onClose, onSaved }) {

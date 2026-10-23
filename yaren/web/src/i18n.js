@@ -24,6 +24,11 @@ export const T = {
     disconnected: "Bağlantı koptu, yeniden bağlanıyor…",
     you: "Sen",
     asrEmpty: "(anlaşılmadı)",
+    memory: "Hafıza", memTitle: "Yaren'in hafızası",
+    memHint: "Yaren bunları her yeni sohbetin başında okur. Konuşurken \"bunu hatırla\" ya da \"şunu unut\" diyebilirsin; buradan da silebilirsin. Dosyalar: run/memory/.",
+    memPeople: "Tanıdığı insanlar", memNotes: "Kendi notları", memRuns: "Son görevler", memDryRuns: "Son görevler (robotsuz test)",
+    memEmpty: "Henüz bir şey yok.", memForget: "Unut", close: "Kapat",
+    locale: "tr-TR",
   },
   en: {
     tagline: "your talking robot-arm friend",
@@ -50,5 +55,10 @@ export const T = {
     disconnected: "Disconnected, reconnecting…",
     you: "You",
     asrEmpty: "(not understood)",
+    memory: "Memory", memTitle: "What Yaren remembers",
+    memHint: "Yaren reads this at the start of every conversation. Say \"remember this\" or \"forget that\" while talking, or delete entries here. Files: run/memory/.",
+    memPeople: "People she knows", memNotes: "Her own notes", memRuns: "Recent runs", memDryRuns: "Recent runs (dry test)",
+    memEmpty: "Nothing yet.", memForget: "Forget", close: "Close",
+    locale: "en-GB",
   },
 };
