@@ -17,6 +17,11 @@
 #        to its start pose and you get TRIAL_RESET_S to put the pen somewhere new.
 #        Keys: -> end attempt early, <- redo attempt, Esc stop. Every attempt is
 #        saved locally (run/rollouts/) so you can count successes afterwards.
+#   ./3_run_autonomous.sh --trt [other options]
+#        Same run, with MolmoAct2's action expert as a TensorRT engine (../tools/trt):
+#        a new chunk takes ~88 ms instead of ~127 ms, the other ticks ~0.3 ms instead
+#        of ~11 ms. First run builds the engine (~80 s, before the arm connects).
+#        With --rtc the expert stays in PyTorch (RTC needs its gradients).
 #
 # SAFETY: the arm moves on its own. Clear the workspace, keep a hand near the
 # power switch the first time. Each joint is limited to MAX_RELATIVE_TARGET
@@ -30,6 +35,7 @@ set -uo pipefail
 source "$(dirname "$0")/lib.sh"
 
 TRIALS=0
+TRT=false
 RTC=false
 CKPT=last
 while [ $# -gt 0 ]; do
@@ -37,7 +43,8 @@ while [ $# -gt 0 ]; do
     --list) exec "$PY" train_dashboard.py --status ;;
     --trials) TRIALS="${2:?--trials needs a number}"; shift 2 ;;
     --rtc) RTC=true; shift ;;
-    -h|--help) sed -n '3,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --trt) TRT=true; shift ;;
+    -h|--help) sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) CKPT="$1"; shift ;;
   esac
 done
@@ -79,11 +86,16 @@ if [ "$RTC" = true ]; then
   MODE_TXT="RTC: next chunk computed in the background when $RTC_QUEUE_THRESHOLD of $CHUNK_SIZE actions are left"
 else
   MODE_ARGS=(--policy.n_action_steps="$N_ACTION_STEPS")
-  MODE_TXT="executes $N_ACTION_STEPS of each $CHUNK_SIZE predicted actions, then predicts again"
+  # MolmoAct2 replaces n_action_steps with its checkpoint metadata (30), so every run so far
+  # executed the whole chunk whatever N_ACTION_STEPS says (rollout_trt.py reports this).
+  MODE_TXT="executes the whole $CHUNK_SIZE-action chunk, then predicts again (MolmoAct2 ignores N_ACTION_STEPS=$N_ACTION_STEPS)"
 fi
 # The policy rebuilds itself from the base checkpoint first; use the local download
 # (a published model names the Hub id, which would mean another 21.8 GB download).
 MODE_ARGS+=(--policy.checkpoint_path="$BASE_CHECKPOINT")
+
+if [ "$RTC" = true ]; then INFER_TXT="TensorRT not used for the expert under --rtc (PyTorch)"
+else INFER_TXT="TensorRT action expert (built on first use, then cached)"; fi
 
 COMMON=(
   --robot.type=so101_follower --robot.port="$FOLLOWER_PORT" --robot.id="$FOLLOWER_ID"
@@ -95,15 +107,22 @@ COMMON=(
 echo
 info "Policy:  $POLICY"
 info "Actions: $MODE_TXT, max $MAX_RELATIVE_TARGET deg/tick per joint"
+[ "$TRT" = true ] && info "Inference: $INFER_TXT"
 warn "The arm will move by itself in a few seconds. Hand near the power switch. Ctrl+C stops."
 echo
 
+if [ "$TRT" = true ]; then
+  # Same lerobot-rollout, same robot code and limits; the network runs as a TensorRT engine.
+  ROLLOUT=("$PY" "$(cd "$HERE/../tools/trt" && pwd)/rollout_trt.py")
+else
+  ROLLOUT=(lerobot-rollout)
+fi
 [ "$POLICY" = "$MODEL_REPO" ] || export HF_HUB_OFFLINE=1
 if [ "$TRIALS" -gt 0 ]; then
   STAMP=$(date +%Y%m%d_%H%M%S)
   ROOT="$RUN_DIR/rollouts/$STAMP"
   mkdir -p "$(dirname "$ROOT")"
-  lerobot-rollout "${COMMON[@]}" --strategy.type=episodic \
+  "${ROLLOUT[@]}" "${COMMON[@]}" --strategy.type=episodic \
     --dataset.repo_id="${HF_USER}/rollout_pen_bowl_molmoact2_${STAMP}" --dataset.root="$ROOT" \
     --dataset.single_task="$TASK" --dataset.num_episodes="$TRIALS" \
     --dataset.episode_time_s="$TRIAL_TIME_S" --dataset.reset_time_s="$TRIAL_RESET_S" \
@@ -113,5 +132,5 @@ if [ "$TRIALS" -gt 0 ]; then
   echo "Attempts saved in $ROOT (videos/ holds the wrist-camera video of every attempt)"
   exit $rc
 else
-  exec lerobot-rollout "${COMMON[@]}" --strategy.type=base --duration="$RUN_DURATION_S"
+  exec "${ROLLOUT[@]}" "${COMMON[@]}" --strategy.type=base --duration="$RUN_DURATION_S"
 fi

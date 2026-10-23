@@ -12,6 +12,10 @@
 #        to its start pose and you get TRIAL_RESET_S to put the pen somewhere new.
 #        Keys: -> end attempt early, <- redo attempt, Esc stop. Every attempt is
 #        saved locally (run/rollouts/) so you can count successes afterwards.
+#   ./3_run_autonomous.sh --trt [other options]
+#        Same run, with ACT as a TensorRT fp16 engine (../tools/trt): 1.8 ms instead
+#        of 4.1 ms per tick, actions within 0.11 deg of PyTorch. The first run of a
+#        checkpoint builds the engine (~30 s, before the arm connects); then cached.
 #
 # SAFETY: the arm moves on its own. Clear the workspace, keep a hand near the
 # power switch the first time. Each joint is limited to MAX_RELATIVE_TARGET
@@ -25,12 +29,14 @@ set -uo pipefail
 source "$(dirname "$0")/lib.sh"
 
 TRIALS=0
+TRT=false
 CKPT=last
 while [ $# -gt 0 ]; do
   case "$1" in
     --list) exec "$PY" train_dashboard.py --status ;;
     --trials) TRIALS="${2:?--trials needs a number}"; shift 2 ;;
-    -h|--help) sed -n '3,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --trt) TRT=true; shift ;;
+    -h|--help) sed -n '3,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) CKPT="$1"; shift ;;
   esac
 done
@@ -64,6 +70,8 @@ case "$ACTION_MODE" in
   *) die "ACTION_MODE must be ensemble or chunk (config.env)" ;;
 esac
 
+INFER_TXT="TensorRT fp16 engine (built on first use, then cached)"
+
 COMMON=(
   --robot.type=so101_follower --robot.port="$FOLLOWER_PORT" --robot.id="$FOLLOWER_ID"
   --robot.max_relative_target="$MAX_RELATIVE_TARGET" --robot.cameras="$CAMERAS"
@@ -74,15 +82,22 @@ COMMON=(
 echo
 info "Policy:  $POLICY"
 info "Actions: $MODE_TXT, max $MAX_RELATIVE_TARGET deg/tick per joint"
+[ "$TRT" = true ] && info "Inference: $INFER_TXT"
 warn "The arm will move by itself in a few seconds. Hand near the power switch. Ctrl+C stops."
 echo
 
+if [ "$TRT" = true ]; then
+  # Same lerobot-rollout, same robot code and limits; the network runs as a TensorRT engine.
+  ROLLOUT=("$PY" "$(cd "$HERE/../tools/trt" && pwd)/rollout_trt.py")
+else
+  ROLLOUT=(lerobot-rollout)
+fi
 [ "$POLICY" = "$MODEL_REPO" ] || export HF_HUB_OFFLINE=1
 if [ "$TRIALS" -gt 0 ]; then
   STAMP=$(date +%Y%m%d_%H%M%S)
   ROOT="$RUN_DIR/rollouts/$STAMP"
   mkdir -p "$(dirname "$ROOT")"
-  lerobot-rollout "${COMMON[@]}" --strategy.type=episodic \
+  "${ROLLOUT[@]}" "${COMMON[@]}" --strategy.type=episodic \
     --dataset.repo_id="${HF_USER}/rollout_pen_bowl_act_${STAMP}" --dataset.root="$ROOT" \
     --dataset.single_task="$TASK" --dataset.num_episodes="$TRIALS" \
     --dataset.episode_time_s="$TRIAL_TIME_S" --dataset.reset_time_s="$TRIAL_RESET_S" \
@@ -92,5 +107,5 @@ if [ "$TRIALS" -gt 0 ]; then
   echo "Attempts saved in $ROOT (videos/ holds the wrist-camera video of every attempt)"
   exit $rc
 else
-  exec lerobot-rollout "${COMMON[@]}" --strategy.type=base --duration="$RUN_DURATION_S"
+  exec "${ROLLOUT[@]}" "${COMMON[@]}" --strategy.type=base --duration="$RUN_DURATION_S"
 fi

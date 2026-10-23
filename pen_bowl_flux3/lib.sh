@@ -50,5 +50,5 @@ recorder_running() {
   ps -eo args= | grep -Eq '^[^ ]*python[^ ]*( -[^ ]+)* [^ ]*record_session\.py'
 }
 rollout_running() {
-  ps -eo args= | grep -Eq '^[^ ]*python[^ ]*( -[^ ]+)* [^ ]*lerobot-rollout'
+  ps -eo args= | grep -Eq '^[^ ]*python[^ ]*( -[^ ]+)* [^ ]*(lerobot-rollout|rollout_trt\.py)'
 }
