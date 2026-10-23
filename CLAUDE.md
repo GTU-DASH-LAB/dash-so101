@@ -30,6 +30,11 @@ Learning/experiments with the **SO-101** robotic arms and Vision-Language-Action
   section below — its memory requirements are nothing like pi0's.
 - `pencil_pickup_vla/` — earlier task: SmolVLA fine-tuned on Kaggle for pencil
   pickup.
+- `yaren/` — **Yaren**, the talking robot friend: a local voice agent (React web app + FastAPI;
+  Whisper → Qwen3.8 via Ollama → Chatterbox on GPU1) that drives `pen_bowl_molmoact2` (MolmoAct2 +
+  TensorRT, kept warm on GPU0) with the user's request as the task prompt. Not a numbered pipeline:
+  `setup.sh` / `start.sh [--dry]` / `stop.sh`, robot settings from the policy folder's `config.env`.
+  See `yaren/README.md` and the section below.
 - `daily_progress/` — dated diary (`day1.md`, `day2.md`, …), English + Türkçe.
 - `.claude/skills/robotics-reel-series/` — project skill for the "Day N of making
   robotics videos until I get recognized" Instagram/LinkedIn reel series: ChatCut
@@ -356,3 +361,26 @@ narrower x4 PCIe link. Nothing about 78GB/113GB/`free -h` transfers. Re-measure.
   `N_ACTION_STEPS` in `config.env` says. `rollout_trt.py --trt-n-action-steps N` really sets it.
 - Under `--rtc` the MolmoAct2 expert stays in PyTorch, because RTC guidance backpropagates through it.
 - LoRA (`use_peft`) checkpoints are not covered.
+
+### `yaren/` — voice agent (two GPUs, two venvs, its own Ollama)
+
+- **Split by GPU on purpose:** `robot_server.py` (lelab venv) holds MolmoAct2 + TensorRT on GPU0
+  (15.2 GB). Whisper + Chatterbox + Qwen3.8-27B share GPU1 (24.7 GB of 32 GB). The voice side has its
+  own venv `~/envs/yaren`, because Chatterbox 0.1.7 pins transformers 5.2 and lerobot pins 5.5.
+- **Ollama ≥0.40 also enumerates GPUs through Vulkan, which ignores `CUDA_VISIBLE_DEVICES`.** Qwen
+  then landed on GPU0, and the robot server died loading its engine
+  (`could not deserialize …molmoact2_flowstep_….plan`: GPU0 was full). Always start it with
+  `OLLAMA_VULKAN=0`, `GGML_VK_VISIBLE_DEVICES=<gpu>` and `CUDA_DEVICE_ORDER=PCI_BUS_ID` (GPU0 = PCI
+  01:00.0, GPU1 = 08:00.0, the x4 link). `start.sh` does this.
+- Yaren runs its own Ollama 0.40.9 from `~/opt` on port 11435. The system Ollama
+  (`/usr/local/bin`, :11434) is 0.32.9 and refuses Qwen3.8 ("requires a newer version"). Leave the
+  system one alone.
+- `robot_server.py` reuses lerobot's `build_rollout_context` through `tools/trt/rollout_trt.install()`
+  and the policy folder's `config.env`, so clamp, cameras, serial check and start pose match
+  `3_run_autonomous.sh --trt`. Every policy folder's `lib.sh` `rollout_running()` counts
+  `robot_server.py` as a rollout. `--dry` replays a recorded episode instead of connecting the arm.
+  Test new agent behaviour with that first.
+- Measured LLM failure modes and their guards (details in `yaren/README.md`): Qwen sometimes
+  announces an action without calling `do_task` (1/20), and Chatterbox appends hallucinated tails
+  after the sentence. Rerun `yaren/selftest.py` against `./start.sh --dry` after changing the
+  persona, tools or voice code.
