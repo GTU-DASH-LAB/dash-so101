@@ -86,6 +86,8 @@ def main() -> int:
     ap.add_argument("--fps", type=float, default=30.0, help="control rate that defines a deadline miss")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--skip-pre", action="store_true",
+                    help="ticks that only pop the action queue skip the preprocessor (rollout_trt.py does this for molmoact2)")
     ap.add_argument("--save")
     ap.add_argument("--compare")
     a = ap.parse_args()
@@ -140,10 +142,15 @@ def main() -> int:
         sync()
         t_a = time.perf_counter()
         with torch.inference_mode():
-            batch = pre(dict(obs))
-            sync(); t_b = time.perf_counter()
-            act = policy.select_action(batch)
-            sync(); t_c = time.perf_counter()
+            if a.skip_pre and len(target._action_queue) > 0:
+                t_b = time.perf_counter()
+                act = target._action_queue.popleft()
+                t_c = time.perf_counter()
+            else:
+                batch = pre(dict(obs))
+                sync(); t_b = time.perf_counter()
+                act = policy.select_action(batch)
+                sync(); t_c = time.perf_counter()
             act = post(act)
             sync(); t_d = time.perf_counter()
         if k < a.warmup:

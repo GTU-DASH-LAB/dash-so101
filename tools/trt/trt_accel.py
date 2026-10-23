@@ -19,7 +19,7 @@ on sm_120. See README.md in this folder for the measurements.
 Engines are cached in ~/.cache/dash_so101_trt (DASH_TRT_CACHE overrides). The cache key is a hash
 of the module's weights (not file names or dates: MolmoAct2's run script recreates its deploy
 folder on every run), the input shapes, the GPU and the TensorRT version. A first build takes
-20-60 s; a cached engine loads in ~1 s.
+25-80 s (ACT 28 s, MolmoAct2 78 s on the 5090); a cached engine loads in ~1 s.
 """
 
 import hashlib
