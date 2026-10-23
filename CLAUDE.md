@@ -381,6 +381,14 @@ narrower x4 PCIe link. Nothing about 78GB/113GB/`free -h` transfers. Re-measure.
   `robot_server.py` as a rollout. `--dry` replays a recorded episode instead of connecting the arm.
   Test new agent behaviour with that first.
 - Measured LLM failure modes and their guards (details in `yaren/README.md`): Qwen sometimes
-  announces an action without calling `do_task` (1/20), and Chatterbox appends hallucinated tails
-  after the sentence. Rerun `yaren/selftest.py` against `./start.sh --dry` after changing the
+  announces an action without calling `do_task` (1/20) and, far more often, says it deleted a memory
+  without calling `forget` (14/20). Chatterbox appends hallucinated tails after the sentence.
+- Long-term memory (`yaren/agent/memory.py`, Hermes Agent style): `people.md` and `notes.md`
+  (1500 chars each, written by the LLM's `remember`/`forget` tools) and `runs.jsonl` (logged
+  automatically from robot_server's `recent_results`). All live in `MEMORY_DIR` (default
+  `run/memory/`, git-ignored) and are read once per conversation into the system prompt. Point an
+  exported `MEMORY_DIR` at a scratch folder when testing, so tests don't write into the real memory.
+- Warming Ollama with the session's system prompt does **not** speed up the first turn with
+  qwen3.8 on Ollama 0.40.9: only a request that extends the previous one reuses the cache. Measured
+  ~400 ms prefill for 1,666 tokens either way, ~155 ms for follow-up turns. Rerun `yaren/selftest.py` against `./start.sh --dry` after changing the
   persona, tools or voice code.

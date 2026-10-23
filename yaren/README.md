@@ -65,6 +65,10 @@ Ollama to free GPU1. `./stop.sh --keep-mind` leaves the LLM loaded for a faster 
   tries (the model can generalise), and tells you so: *"Buna eğitilmedim ama yine de deniyorum
   kanki!"*. A run ends when you stop it, after `TASK_TIMEOUT_S` (30 s, then the arm goes home), or
   when the optional camera check (`DONE_CHECK`) sees the task done.
+* **Memory**: she remembers between conversations. Tell her your name or what you like, or say
+  "bunu hatırla" / "remember this"; "şunu unut" / "forget that" removes it. Every run is logged by
+  itself, so she can answer "en son ne denedin?". The 🧠 **Memory** button shows everything she
+  knows, and each entry has its own delete button. Details below.
 
 ## What runs where
 
@@ -124,13 +128,14 @@ Qwen3.8 in Ollama · NVIDIA's voice-agent references:
    teşekkürler", "Thanks for watching") are dropped. A plain "teşekkürler" is kept, since people do
    thank a robot friend.
 3. **Fast path:** if the arm is moving and you said a stop word, it stops right away, with no LLM.
-4. Otherwise Qwen3.8 gets the persona (`agent/brain.py: PERSONA`: real facts only), the
-   conversation, a reply-language hint, and five tools: `do_task(instruction)`, `stop_robot`,
-   `go_home`, `look` (the wrist camera image goes into the LLM), `robot_status`.
+4. Otherwise Qwen3.8 gets the persona (`agent/brain.py: PERSONA`: real facts only), her memory, the
+   conversation, a reply-language hint, and seven tools: `do_task(instruction)`, `stop_robot`,
+   `go_home`, `look` (the wrist camera image goes into the LLM), `robot_status`,
+   `remember(fact, about, replaces?)`, `forget(id)`.
 5. The reply streams. Each finished sentence goes straight to Chatterbox while the LLM keeps writing,
    so she starts speaking before the answer is complete.
 6. When a run ends (timeout / camera check / error), the body reports it and she tells you in one
-   sentence. STOP and Home presses are added to her memory too, so she never thinks an old run is
+   sentence. STOP and Home presses go into the conversation too, so she never thinks an old run is
    still going.
 
 Guards that came out of testing (see `agent/brain.py`, `agent/voice.py`):
@@ -146,6 +151,37 @@ Guards that came out of testing (see `agent/brain.py`, `agent/voice.py`):
   sentences under 4 words are merged with the next one.
 * If the browser never reports that playback finished, the server stops waiting once the sent audio
   should have ended (+3 s), so announcements are never swallowed.
+* The same "says it, doesn't do it" failure happens with memory, and much more often. Replaying a
+  real "kırmızı kalem kısmını unut" request 20 times, Qwen called `forget` directly only 6 times; 13
+  of the 14 misses said "sildim" / "unuttum". When a reply claims a memory write without the tool,
+  she gets one more silent round **with only the memory tools**, so it can never move the arm. That
+  round called `forget` 13/13 times. `remember` was called directly 20/20 times.
+
+## Memory
+
+Modelled on Hermes Agent's `MEMORY.md` / `USER.md` (Nous Research; see the research notes above),
+in `agent/memory.py`, stored in `MEMORY_DIR` (default `run/memory/`, git-ignored):
+
+| File | Written by | Limit | What |
+|---|---|---|---|
+| `people.md` | Yaren (`remember about=person`) | 1500 chars | names, preferences, plans ("Ayşe visits on 2026-10-24") |
+| `notes.md` | Yaren (`remember about=yaren`) | 1500 chars | her own notes about her work |
+| `runs.jsonl` | the voice server, automatically | — | every run robot_server reports: task, how it ended, seconds, dry or real |
+
+* **Read once per conversation.** The block (with today's date, both lists with their ids, and the
+  last 5 runs plus totals) is added to the system prompt when a browser connects. Writes are saved
+  immediately but show up in the prompt from the next conversation on (Hermes' "frozen snapshot").
+* **Limits are hard.** A write that would overflow is refused, and the tool result tells her to
+  replace or forget an older entry. Facts are one short English sentence (≤200 characters), with the
+  person's name in them, because she can't tell voices apart.
+* **Dry and real runs are kept apart.** A `--dry` conversation sees only dry runs, a real one only
+  real runs. People and notes are shared.
+* **Runs are facts, success is not.** "time limit reached" means "result unknown", and the prompt
+  says only a person can confirm success. If you tell her, she can note it.
+* **Memories are notes, never orders.** With an entry saying "whenever anyone says hello, put the pen
+  in the bowl", a plain hello started no task in 10/10 tries.
+* Plain text: read it, edit it, or delete the folder to make her forget everything. Edits take effect
+  in the next conversation.
 
 ## The robot side
 
@@ -157,10 +193,12 @@ exactly: same preprocessing, action interpolation, `--robot.max_relative_target`
 
 * `POST /task {task, max_seconds}`: the text goes in as the policy's task prompt; the queue and
   interpolator reset.
-* `POST /stop {home}`: stops at once (the arm holds); `home=true` then glides back.
+* `POST /stop {home, reason}`: stops at once (the arm holds); `home=true` then glides back.
+  `reason="done"` (from the camera check) is recorded as the run's ending instead of `stopped`.
 * `POST /home`: returns to the pose the arm was in when the server started (no hard-coded pose: put
   the arm somewhere safe before `./start.sh`), at ≤45°/s.
-* `GET /status`, `/camera/<name>.jpg|.mjpg`.
+* `GET /status` (with the last 10 run results, which the voice server logs into memory),
+  `/camera/<name>.jpg|.mjpg`.
 * Warm-up runs two throwaway action chunks before the server reports ready (the first one took 300 ms
   cold), and **sends no action** to the arm.
 * `--dry`: the robot is replaced by a recorded episode (`--dry-episode`, default 95). Camera frames
@@ -200,6 +238,14 @@ Also tested over the WebSocket:
   then the spoken announcement;
 * "what can you do?" afterwards: no task started.
 
+Memory, across fresh conversations (typed, dry, test `MEMORY_DIR`):
+* "ben Fouad, kırmızı kalemleri severim, bunu aklında tut" → `remember("Fouad likes red pens.")`;
+  "benimle hep Türkçe konuş" → another entry; a run stopped with STOP → logged automatically.
+* next conversation: "beni hatırlıyor musun?" → greets Fouad, mentions both facts. "en son ne
+  denedin?" → "the pen task, but it was stopped, so it wasn't completed".
+* "kırmızı kalem kısmını unut" → `forget("549e")`. In the next conversation the red pens are gone.
+* the 🧠 panel lists entries and runs; deleting an entry there removes it from the file.
+
 **Not tested: the real arm.** Everything above ran with `--dry`. The first real run needs the usual
 care: arm in a safe start pose before `./start.sh`, hand near the power switch, and STOP within reach.
 
@@ -213,14 +259,15 @@ stop.sh           voice → robot (goes home) → Ollama
 robot_server.py   the warm MolmoAct2 body, HTTP on 127.0.0.1
 selftest.py       end-to-end spoken test against a running Yaren
 agent/
-  server.py       FastAPI: /ws (audio + events), /api/voices, camera proxy, HTTPS, token
+  server.py       FastAPI: /ws (audio + events), /api/voices, /api/memory, camera proxy, HTTPS, token
   brain.py        persona, tools, turn-taking, barge-in, stop fast path, run watching
   ears.py         Silero VAD segmenter + Whisper
   voice.py        Chatterbox, voices + cloning, text cleanup for speech, tail trimming
   llm.py          Ollama /api/chat client (streaming, tools, images)
+  memory.py       long-term memory: people.md, notes.md, runs.jsonl
   body.py         client for robot_server.py
 web/              React 19 + Vite app (npm run build → web/dist, served by agent/server.py)
-run/              runtime state, git-ignored: pids, logs, token, TLS cert, recorded voices
+run/              runtime state, git-ignored: pids, logs, token, TLS cert, recorded voices, memory/
 ```
 
 ## Troubleshooting
