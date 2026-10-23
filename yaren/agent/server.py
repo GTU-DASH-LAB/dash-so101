@@ -29,6 +29,7 @@ from .body import Body
 from .brain import PERSONA, TOOLS, Session
 from .ears import Ears
 from .llm import LLM
+from .memory import STORES, Memory
 from .voice import Voice
 
 log = logging.getLogger("yaren.server")
@@ -58,6 +59,7 @@ CFG = {
     "done_check_after_s": env("DONE_CHECK_AFTER_S", "5", float),
     "done_check_every_s": env("DONE_CHECK_EVERY_S", "2.0", float),
     "done_check_streak": env("DONE_CHECK_STREAK", "2", int),
+    "memory_dir": os.path.expanduser(env("MEMORY_DIR", str(RUN / "memory"))),
 }
 
 
@@ -72,6 +74,8 @@ class Hub:
         self.voice = Voice(CFG["tts_model"], CFG["voice_refs"], RUN / "voices")
         self.llm = LLM(CFG["llm_url"], CFG["llm_model"], CFG["llm_ctx"])
         self.body = Body(CFG["robot_url"])
+        self.memory = Memory(CFG["memory_dir"])
+        self.logged_at = self.memory.last_run_at()   # runs up to here are already in runs.jsonl
         self.robot_status = None
         self.robot_error = None
         self.llm_ready = False
@@ -81,12 +85,25 @@ class Hub:
         while True:
             try:
                 self.robot_status, self.robot_error = await self.body.status(), None
+                self.log_runs(self.robot_status)
             except Exception as e:  # noqa: BLE001
                 self.robot_status, self.robot_error = None, f"{type(e).__name__}: {e}"
             msg = {"type": "robot", "status": self.robot_status, "error": self.robot_error, "llm": self.llm_ready}
             for s in list(self.sessions):
                 s.out.put_nowait(("json", msg))
             await asyncio.sleep(0.5)
+
+    def log_runs(self, status):
+        """Every run robot_server.py reports goes into the memory once, whoever started it."""
+        for r in status.get("recent_results") or []:
+            if (r.get("at") or 0) > self.logged_at:
+                self.memory.log_run(r, dry=status.get("dry"))
+                self.logged_at = r["at"]
+
+    def memory_view(self):
+        dry = bool((self.robot_status or {}).get("dry"))
+        return {"entries": self.memory.listing(), "dry": dry, "runs": self.memory.runs(dry)[-20:],
+                "usage": {s: self.memory.usage(s) for s in STORES}}
 
     def health(self):
         return {"ears": True, "voice": True, "llm": self.llm_ready, "llm_model": CFG["llm_model"],
@@ -150,6 +167,19 @@ def make_app(hub, token):
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         return hub.voice.list()
+
+    @app.get("/api/memory")
+    def memory(request: Request):
+        check(req_token(request))
+        return hub.memory_view()
+
+    @app.delete("/api/memory/{eid}")
+    def forget(eid: str, request: Request):
+        check(req_token(request))
+        res = hub.memory.forget(eid)
+        if "error" in res:
+            raise HTTPException(404, res["error"])
+        return hub.memory_view()
 
     @app.get("/api/camera/{name}.jpg")
     async def camera_jpg(name: str, request: Request):

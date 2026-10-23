@@ -18,8 +18,8 @@ class Body:
         r.raise_for_status()
         return r.json()
 
-    async def stop(self, home=False):
-        r = await self.http.post("/stop", json={"home": home})
+    async def stop(self, home=False, reason=None):
+        r = await self.http.post("/stop", json={"home": home, "reason": reason})
         r.raise_for_status()
         return r.json()
 

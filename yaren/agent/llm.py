@@ -54,8 +54,10 @@ class LLM:
         return (r.json().get("message") or {}).get("content", "").strip()
 
     async def warm(self, system=None, tools=None):
-        """Load the model into VRAM and keep it there; with the real system prompt and tools, their
-        prefix is also already in the KV cache for the first real turn (cold, that turn took 5 s)."""
+        """Load the model into VRAM and keep it there (cold, the first turn took 5 s: the model load).
+        It does not pre-cache the prompt: with qwen3.8 on Ollama 0.40.9 only a request that extends
+        the previous one reuses the cache (measured: 1,666 tokens prefill in ~400 ms with or without a
+        warm-up; follow-up turns of a conversation ~155 ms)."""
         t = time.time()
         msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": "Hi"}]
         r = await self.http.post("/api/chat", json=self._payload(msgs, tools, stream=False, num_predict=1))

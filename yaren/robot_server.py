@@ -26,12 +26,14 @@ without moving anything.
 """
 
 import asyncio
+import collections
 import logging
 import sys
 import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -142,11 +144,12 @@ class Body:
         self.cams = [k for k, v in self.robot.observation_features.items() if isinstance(v, tuple)]
         self.lock = threading.Lock()
         self.state = "idle"            # idle | running | homing
-        self.request = None            # ("task", text, max_s) | ("stop", home) | ("home",)
+        self.request = None            # ("task", text, max_s) | ("stop", home, reason) | ("home",)
         self.task = None
         self.task_started = 0.0
         self.task_max_s = task_timeout
         self.last_result = None
+        self.recent_results = collections.deque(maxlen=10)   # so a poller that blinks misses no run
         self.error = None
         self.frames = {}
         self.joints = {}
@@ -171,6 +174,7 @@ class Body:
             return {
                 "state": self.state, "task": self.task, "elapsed_s": None if el is None else round(el, 1),
                 "max_seconds": self.task_max_s, "last_result": self.last_result, "error": self.error,
+                "recent_results": list(self.recent_results),
                 "runs": self.runs, "joints": {k: round(v, 1) for k, v in self.joints.items()},
                 "tick_ms_p50": round(float(np.percentile(tick, 50)), 2),
                 "tick_ms_max": round(float(tick.max()), 1),
@@ -182,6 +186,7 @@ class Body:
     def _finish(self, how):
         dur = round(time.time() - self.task_started, 1)
         self.last_result = {"task": self.task, "ended": how, "seconds": dur, "at": time.time()}
+        self.recent_results.append(self.last_result)
         log.info("run ended (%s) after %.1f s: %s", how, dur, self.task)
         self.engine.reset()
         self.interp.reset()
@@ -209,7 +214,7 @@ class Body:
             log.info("run %d: %r (max %.0f s)", self.runs, text, max_s)
         elif kind == "stop":
             if self.state == "running":
-                self._finish("stopped")
+                self._finish(req[2] or "stopped")
             self.state = "idle"
             if req[1]:
                 self._start_home(joints)
@@ -349,6 +354,7 @@ class TaskReq(BaseModel):
 
 class StopReq(BaseModel):
     home: bool = False
+    reason: Literal["stopped", "done"] | None = None   # "done": the voice side's camera check ended it
 
 
 def make_app(body, dry):
@@ -379,7 +385,7 @@ def make_app(body, dry):
 
     @app.post("/stop")
     def stop(req: StopReq | None = None):
-        body.submit(("stop", bool(req and req.home)))
+        body.submit(("stop", bool(req and req.home), req.reason if req else None))
         return {"ok": True}
 
     @app.post("/home")
