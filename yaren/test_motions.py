@@ -148,6 +148,36 @@ def test_table_and_limits():
             raise AssertionError(bad)
 
 
+def test_guide():
+    """A joint model: the servo pulls toward its goal (stiffness), gravity pulls with at most the largest
+    steady error seen in the demos, a hand pushes. Pushed: it follows; let go: it holds; never creeps."""
+    g = M.Guide(REST)
+    pos = dict(REST)
+    k = 0.3                                   # fraction of the error closed per tick (any 0 < k < 1)
+    sag = {"shoulder_lift": -3.74, "elbow_flex": 4.18}   # worst measured steady error, signed both ways
+    def tick(hand=None):
+        goal = g.step(pos)
+        for j in M.JOINTS:
+            target = goal[j] + sag.get(j, 0.0)
+            pos[j] = hand[j] if hand and j in hand else pos[j] + k * (target - pos[j])
+        return goal
+    for _ in range(300):                      # 10 s alone: gravity must not drag the goal anywhere
+        tick()
+    assert all(abs(g.goal[j] - REST[j]) < 1e-9 for j in M.JOINTS), g.goal
+    hand = dict(pos)
+    for _ in range(90):                       # a hand raises the elbow by 40 deg over 3 s
+        hand["elbow_flex"] -= 40 / 90
+        tick(hand)
+    lag = g.goal["elbow_flex"] - hand["elbow_flex"]          # the goal trails the hand by half to one deadband
+    assert M.GUIDE_DEADBAND["elbow_flex"] / 2 - 1e-6 <= lag <= M.GUIDE_DEADBAND["elbow_flex"] + 1e-6, lag
+    held = g.goal["elbow_flex"]
+    for _ in range(300):                      # let go: it settles near the hand's last position and stays
+        tick()
+    assert g.goal["elbow_flex"] == held
+    # springback on release: the trailing distance plus gravity's sag, at most one deadband + 4.18 deg
+    assert abs(pos["elbow_flex"] - hand["elbow_flex"]) <= M.GUIDE_DEADBAND["elbow_flex"] + 4.18 + 1e-6
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

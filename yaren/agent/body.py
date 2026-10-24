@@ -38,6 +38,11 @@ class Body:
         r.raise_for_status()
         return r.json()
 
+    async def guide(self, on=True):
+        r = await self.http.post("/guide", json={"on": on})
+        r.raise_for_status()
+        return r.json()
+
     async def frame(self, camera):
         r = await self.http.get(f"/camera/{camera}.jpg")
         r.raise_for_status()

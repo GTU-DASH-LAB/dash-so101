@@ -57,14 +57,15 @@ MEMORY_CLAIM = re.compile(
 MEMORY_NUDGE = ("[Robot body event] You said you saved or deleted something in your memory, but you called "
                 "no memory tool, so nothing changed. If the user asked you to remember or forget something, "
                 "call remember or forget now. Do not say anything more. Otherwise reply with an empty message.")
-MOTION_TOOLS = {"do_task", "stop_robot", "go_home", "gesture", "move_part"}
+MOTION_TOOLS = {"do_task", "stop_robot", "go_home", "gesture", "move_part", "hand_guide"}
 MEMORY_TOOL_NAMES = {"remember", "forget"}
 # The same miss for gestures, without any claim: asked to "say hi", qwen often only says "Hi!". When the
 # user's words name a gesture or a body part and nothing moved, the intent check decides about a nudge.
 MOVE_ASK = re.compile(
     r"(say (hi|hello)|selam ver|merhaba de|\bwave\b|el salla|salla|\bdans|\bdanc|\bnod\b|\bbow\b|eğil|reverans|"
     r"ayağa kalk|stand up|kaldır|indir|\braise|\blift|\blower|\bturn\b|\bdön|çevir|\bopen\b|\baç\b|\bclose\b|"
-    r"kapat|elbow|dirse|wrist|bile[ğk]|shoulder|omuz|gripper|ağz|mouth|alkış|clap|look around|etrafına bak)", re.I)
+    r"kapat|elbow|dirse|wrist|bile[ğk]|shoulder|omuz|gripper|ağz|mouth|alkış|clap|look around|etrafına bak|"
+    r"by hand|elle|gravity|yerçekimi|hand.?guid)", re.I)
 MOVE_NUDGE = ("[Robot body event] The user asked for a movement, but you called no tool, so the arm did not "
               "move. Call the right tool now (gesture for body language, move_part for one part). Do not say "
               "anything more: the user already heard you. If no movement was asked for, reply with an empty message.")
@@ -139,7 +140,12 @@ Your gripper is your hand and your mouth: "open your mouth" or "open your hand" 
 gripper open. Give degrees only when the user says how much. Moves are small and slow on purpose and \
 the part stays there (go_home brings everything back). If the result says limited_by or error, tell \
 the user briefly why (a joint limit, too close to the table) and what could work instead.
-- Gestures and part moves never run during a task run: if one is going, ask whether to stop it first.
+- hand_guide: on when someone wants to move you with their hands (hand-guiding, "gravity \
+compensation", "seni elle oynatayım"): you keep holding your weight, follow their push, and stay where \
+they leave you (a few degrees of springback is normal). Off when they are done; stop, go_home, a task \
+or a gesture also end it.
+- Gestures, part moves and hand-guiding never run during a task run: if one is going, ask whether to \
+stop it first.
 - look: to see what your wrist camera sees right now.
 - robot_status: when asked what you are doing or how the task is going.
 After do_task, the run lasts until it ends by itself or is stopped; a message tagged [Robot body \
@@ -190,6 +196,11 @@ TOOLS = [
                                          "up/down. gripper: open/close."},
             "degrees": {"type": "number", "description": "Optional: how far, in degrees (gripper: percent "
                                                          "of its opening). Default 20, at most 45."}}}}},
+    {"type": "function", "function": {
+        "name": "hand_guide",
+        "description": "Hand-guiding: people can push your arm by hand; you follow and hold where they leave you.",
+        "parameters": {"type": "object", "required": ["on"], "properties": {
+            "on": {"type": "boolean", "description": "true: start hand-guiding. false: stop it (you hold the pose)."}}}}},
     {"type": "function", "function": {
         "name": "look", "description": "See the current image from the wrist camera.",
         "parameters": {"type": "object", "properties": {}}}},
@@ -315,7 +326,7 @@ class Session:
         else:
             self.lang = lang or guess_lang(text, self.lang)
         robot = self.hub.robot_status or {}
-        if is_stop_command(text) and robot.get("state") in ("running", "homing", "moving"):
+        if is_stop_command(text) and robot.get("state") in ("running", "homing", "moving", "guiding"):
             await self.interrupt("stop command")
             try:
                 await self.hub.body.stop(home=False)
@@ -365,6 +376,16 @@ class Session:
             self.send(type="error", message=f"robot stop failed: {e}")
         self.send(type="tool", name="stop_robot", args={}, result={"button": True})
         self._settle()
+
+    async def guide_button(self, on):
+        res = await self.hub.body.guide(on)
+        if res.get("error"):
+            self.send(type="error", message=f"hand-guiding: {res['error']}")
+        elif on:
+            self.body_note("The user switched hand-guiding on with the button: they can move your arm by hand.")
+        else:
+            self.body_note("The user switched hand-guiding off: you hold the pose they left you in.")
+        self.send(type="tool", name="hand_guide", args={"on": on}, result={**res, "button": True})
 
     async def home_button(self):
         await self.hub.body.home()
@@ -557,6 +578,8 @@ class Session:
                 except (TypeError, ValueError):
                     deg = None
                 return await body.move(str(args.get("part", "")).strip(), str(args.get("direction", "")).strip(), deg), None
+            if name == "hand_guide":
+                return await body.guide(bool(args.get("on", True))), None
             if name == "look":
                 cam = (self.hub.robot_status or {}).get("cameras", ["wrist"])[0]
                 jpg = await body.frame(cam)

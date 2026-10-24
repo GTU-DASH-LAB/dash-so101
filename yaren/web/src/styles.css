@@ -97,6 +97,8 @@ section { min-height: 0; }
 .robot-chip { position: absolute; top: 10px; right: 12px; font-size: 13px; font-weight: 700; padding: 5px 12px; border-radius: 999px; background: #0b1020cc; border: 1px solid var(--line); }
 .robot-chip.running { background: var(--red); border-color: var(--red); box-shadow: 0 0 18px #ff2d5588; }
 .robot-chip.homing { background: var(--blue); border-color: var(--blue); }
+.robot-chip.guiding { background: #f5a524; border-color: #f5a524; color: #0b1020; }
+.actions .ghost.on { background: #f5a524; border-color: #f5a524; color: #0b1020; }
 .robot-chip.moving { background: var(--blue); border-color: var(--blue); box-shadow: 0 0 18px #2f6bff88; }
 .robot-chip.offline { color: var(--muted); }
 .task-overlay { position: absolute; left: 12px; right: 12px; bottom: 12px; background: #0b1020d9; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; align-items: center; }

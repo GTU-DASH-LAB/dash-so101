@@ -335,6 +335,8 @@ export default function App() {
           <div className="actions">
             <button className="stop" onClick={stopAll} title={t.stopHint}>■ {t.stop} <small>{t.stopHint}</small></button>
             <button className="ghost" onClick={() => send({ type: "home" })}>⌂ {t.home}</button>
+            <button className={`ghost ${rstate === "guiding" ? "on" : ""}`} title={t.guideHint}
+              onClick={() => send({ type: "guide", on: rstate !== "guiding" })}>✋ {t.guide}</button>
             <button className="ghost" onClick={() => { player.current?.stop(); send({ type: "hush" }); }}>🤫 {t.hush}</button>
           </div>
         </section>
@@ -378,11 +380,12 @@ function Message({ m, t }) {
   if (m.role === "user") return <div className="msg user"><div className="bubble">{m.text}</div></div>;
   if (m.role === "assistant") return <div className="msg bot"><img src="/yaren.svg" alt="" /><div className="bubble">{m.text}</div></div>;
   if (m.role === "tool") {
-    const icon = { do_task: "🦾", stop_robot: "■", go_home: "⌂", look: "👁", robot_status: "ℹ", remember: "🧠", forget: "🗑", gesture: "👋", move_part: "↕" }[m.name] || "⚙";
+    const icon = { do_task: "🦾", stop_robot: "■", go_home: "⌂", look: "👁", robot_status: "ℹ", remember: "🧠", forget: "🗑", gesture: "👋", move_part: "↕", hand_guide: "✋" }[m.name] || "⚙";
     const detail = m.name === "do_task" ? `“${m.args?.instruction}”${m.result?.trained_skill === false ? " · untrained" : ""}`
       : m.name === "remember" ? `“${m.args?.fact}”` : m.name === "forget" ? `“${m.result?.forgotten ?? m.args?.id}”`
       : m.name === "gesture" ? (t.gestures[m.args?.name] || m.args?.name || "")
-      : m.name === "move_part" ? `${m.args?.part} ${m.args?.direction}${moved(m.result)}` : "";
+      : m.name === "move_part" ? `${m.args?.part} ${m.args?.direction}${moved(m.result)}`
+      : m.name === "hand_guide" ? (m.args?.on ? "on" : "off") : "";
     const err = m.result?.error ? ` · ${m.result.error}` : "";
     return <div className="msg tool">{icon} {m.name} {detail}{err}</div>;
   }

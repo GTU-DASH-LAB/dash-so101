@@ -21,6 +21,7 @@ API (127.0.0.1 only - the voice server is the only client):
   POST /home                     move to the start pose (rate limited, ~2-4 s)
   POST /gesture {name}           play a gesture of motions.py (hello, nod, ...); not during a run
   POST /move {part, direction, degrees}   move one part of the arm (motions.py); not during a run
+  POST /guide {on}               hand-guiding: push the arm and it follows, let go and it holds (motions.Guide)
   GET  /camera/<name>.jpg|.mjpg  latest camera frame / MJPEG stream
 
 --dry: no arm, no camera. The robot is replaced by a stand-in that replays a recorded episode of
@@ -148,9 +149,10 @@ class Body:
         self.auto_home = auto_home
         self.cams = [k for k, v in self.robot.observation_features.items() if isinstance(v, tuple)]
         self.lock = threading.Lock()
-        self.state = "idle"            # idle | running | homing | moving (a gesture or part move)
+        self.state = "idle"            # idle | running | homing | moving (a gesture or part move) | guiding
         self.request = None            # ("task", text, max_s) | ("stop", home, reason) | ("home",) |
                                        # ("gesture", name, future) | ("move", part, direction, degrees, future)
+                                       # | ("guide", on, future)
         self.task = None
         self.task_started = 0.0
         self.task_max_s = task_timeout
@@ -166,6 +168,7 @@ class Body:
         self._home_plan = None
         self._motion = None            # (motions.Plan, perf_counter at its start)
         self.last_motion = None
+        self._guide = None             # motions.Guide while hand-guiding
         self._chunks_before = 0
         self.engine.reset()
         self.engine.start()
@@ -235,6 +238,24 @@ class Body:
         log.info("motion %r: %.1f s %s", plan.name, plan.seconds, plan.summary)
         fut.set_result({"started": True, **plan.summary})
 
+    def _set_guide(self, on, joints, fut=None):
+        res = {"guiding": bool(on)}
+        if on and self.state == "running":
+            res = {"error": f"a task run is in progress ('{self.task}'); stop it first"}
+        elif on:
+            if self.state == "moving":
+                self._end_motion("replaced")
+            if self.state != "guiding":
+                self._guide = motions.Guide(motions.from_obs(joints))
+                log.info("hand-guiding on")
+            self.state = "guiding"
+        elif self.state == "guiding":
+            self._guide = None
+            self.state = "idle"
+            log.info("hand-guiding off")
+        if fut:
+            fut.set_result(res)
+
     def _finish(self, how):
         dur = round(time.time() - self.task_started, 1)
         self.last_result = {"task": self.task, "ended": how, "seconds": dur, "at": time.time()}
@@ -252,6 +273,11 @@ class Body:
 
     def _apply_request(self, req, joints):
         kind = req[0]
+        if kind == "guide":
+            self._set_guide(req[1], joints, req[2])
+            return
+        if self.state == "guiding":    # anything else ends hand-guiding; the arm holds where it is
+            self._set_guide(False, joints)
         if kind in ("gesture", "move"):
             self._start_motion(req, joints)
             return
@@ -342,6 +368,8 @@ class Body:
                         with self.lock:
                             if self.state == "moving":
                                 self._end_motion("done")
+                elif state == "guiding":
+                    self.robot.send_action(motions.to_action(self._guide.step(motions.from_obs(joints))))
                 # idle: send nothing, the servos hold their last goal
                 frames = {}
                 if n % 2 == 0:   # 15 fps preview
@@ -362,7 +390,8 @@ class Body:
                         self._finish("error")
                     if self.state == "moving":
                         self._end_motion("error")
-                    self.state = "idle"     # a failed homing or gesture stops too: hold, report, wait
+                    self._guide = None
+                    self.state = "idle"     # a failed homing, gesture or guiding stops too: hold, report, wait
                 time.sleep(0.2)
             dt = time.perf_counter() - t0
             with self.lock:
@@ -429,6 +458,10 @@ class MoveReq(BaseModel):
     degrees: float | None = None   # gripper: percentage points of its opening; None: open/close fully
 
 
+class GuideReq(BaseModel):
+    on: bool = True
+
+
 class StopReq(BaseModel):
     home: bool = False
     reason: Literal["stopped", "done"] | None = None   # "done": the voice side's camera check ended it
@@ -477,6 +510,10 @@ def make_app(body, dry):
     @app.post("/move")
     def move(req: MoveReq):
         return body.ask(("move", req.part.strip().lower(), req.direction.strip().lower(), req.degrees))
+
+    @app.post("/guide")
+    def guide(req: GuideReq):
+        return body.ask(("guide", req.on))
 
     def frame(name):
         with body.lock:

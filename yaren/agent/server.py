@@ -246,6 +246,8 @@ def make_app(hub, token):
                     await session.stop_button()
                 elif t == "home":
                     await session.home_button()
+                elif t == "guide":
+                    await session.guide_button(bool(ev.get("on")))
                 elif t == "playback":
                     session.on_playback(bool(ev.get("playing")))
                 elif t == "hush":

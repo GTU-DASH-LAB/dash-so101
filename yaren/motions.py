@@ -303,3 +303,29 @@ def to_action(pose):
 
 def from_obs(joints):
     return {k.removesuffix(".pos"): float(v) for k, v in joints.items() if k.removesuffix(".pos") in JOINTS}
+
+
+# ---------------------------------------------------------------- hand-guiding
+# "Move me by hand and I won't fall": the servos stay powered (they are position servos, so the arm keeps
+# holding its weight). A joint pushed further than its deadband from its goal gets a new goal half a
+# deadband behind the hand, so it follows the push against a light, steady resistance; let go and it settles
+# there and holds. The deadbands sit above the largest steady error the servos showed while holding still
+# in the demonstrations (16,980 still frames: pan 1.5, lift 3.7, elbow 4.2, wrist flex 2.3, roll 1.2 deg,
+# gripper 7.1 % while squeezing a pen), so gravity alone should never start a follow. A gravity-torque model
+# from the URDF's link masses did not explain those errors (R^2 <= 0.08 per joint: the 1:345 gearboxes hold
+# the load), so none is used. Servo gains are left as lerobot configures them.
+GUIDE_DEADBAND = {"shoulder_pan": 3.0, "shoulder_lift": 5.0, "elbow_flex": 5.5, "wrist_flex": 3.5,
+                  "wrist_roll": 3.0, "gripper": 9.0}
+
+
+class Guide:
+    def __init__(self, start):
+        self.goal = {j: float(start[j]) for j in JOINTS}
+
+    def step(self, present):
+        """New goal for the measured positions of this tick."""
+        for j, db in GUIDE_DEADBAND.items():
+            d = present[j] - self.goal[j]
+            if abs(d) > db:
+                self.goal[j] = present[j] - math.copysign(db / 2, d)
+        return dict(self.goal)
