@@ -225,12 +225,15 @@ export default function App() {
   const rstate = robot ? robot.state : "offline";
   const camName = robot?.cameras?.[0] || "wrist";
   const progress = robot?.state === "running" && robot.elapsed_s != null ? Math.min(1, robot.elapsed_s / robot.max_seconds) : 0;
+  const motion = robot?.state === "moving" ? robot.motion : null;
   const shownState = vad && state !== "speaking" ? "listening" : state;
 
   return (
     <div className="app">
       <header>
         <Logo small />
+        {/* narrow screens (phone/tablet): the big STOP scrolls away, so a copy stays in the header */}
+        <button className="stop head-stop" onClick={stopAll}>■ {t.stop}</button>
         <div className="chips">
           <Chip ok={connected} label={t.ears} />
           <Chip ok={connected} label={t.voice} />
@@ -314,6 +317,13 @@ export default function App() {
                 <div className="task-time">{robot.elapsed_s?.toFixed(0)} / {robot.max_seconds?.toFixed(0)} s</div>
               </div>
             )}
+            {motion && (
+              <div className="task-overlay">
+                <div className="task-text">{t.gestures[motion.name] || motion.name}</div>
+                <div className="bar"><div style={{ width: `${Math.min(1, motion.elapsed_s / Math.max(motion.seconds, 0.1)) * 100}%` }} /></div>
+                <div className="task-time">{motion.elapsed_s?.toFixed(1)} / {motion.seconds?.toFixed(1)} s</div>
+              </div>
+            )}
           </div>
           <div className="robot-info">
             {robot?.last_result && (
@@ -364,12 +374,15 @@ function Chip({ ok, warn, label, title }) {
 }
 
 function Message({ m, t }) {
+  const moved = (r) => r?.moved != null ? ` · ${r.moved > 0 ? "+" : ""}${r.moved}${r.unit === "%" ? "%" : "°"}${r.limited_by ? ` (${r.limited_by})` : ""}` : "";
   if (m.role === "user") return <div className="msg user"><div className="bubble">{m.text}</div></div>;
   if (m.role === "assistant") return <div className="msg bot"><img src="/yaren.svg" alt="" /><div className="bubble">{m.text}</div></div>;
   if (m.role === "tool") {
-    const icon = { do_task: "🦾", stop_robot: "■", go_home: "⌂", look: "👁", robot_status: "ℹ", remember: "🧠", forget: "🗑" }[m.name] || "⚙";
+    const icon = { do_task: "🦾", stop_robot: "■", go_home: "⌂", look: "👁", robot_status: "ℹ", remember: "🧠", forget: "🗑", gesture: "👋", move_part: "↕" }[m.name] || "⚙";
     const detail = m.name === "do_task" ? `“${m.args?.instruction}”${m.result?.trained_skill === false ? " · untrained" : ""}`
-      : m.name === "remember" ? `“${m.args?.fact}”` : m.name === "forget" ? `“${m.result?.forgotten ?? m.args?.id}”` : "";
+      : m.name === "remember" ? `“${m.args?.fact}”` : m.name === "forget" ? `“${m.result?.forgotten ?? m.args?.id}”`
+      : m.name === "gesture" ? (t.gestures[m.args?.name] || m.args?.name || "")
+      : m.name === "move_part" ? `${m.args?.part} ${m.args?.direction}${moved(m.result)}` : "";
     const err = m.result?.error ? ` · ${m.result.error}` : "";
     return <div className="msg tool">{icon} {m.name} {detail}{err}</div>;
   }

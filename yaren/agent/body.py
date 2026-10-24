@@ -28,6 +28,16 @@ class Body:
         r.raise_for_status()
         return r.json()
 
+    async def gesture(self, name):
+        r = await self.http.post("/gesture", json={"name": name})
+        r.raise_for_status()
+        return r.json()
+
+    async def move(self, part, direction, degrees=None):
+        r = await self.http.post("/move", json={"part": part, "direction": direction, "degrees": degrees})
+        r.raise_for_status()
+        return r.json()
+
     async def frame(self, camera):
         r = await self.http.get(f"/camera/{camera}.jpg")
         r.raise_for_status()

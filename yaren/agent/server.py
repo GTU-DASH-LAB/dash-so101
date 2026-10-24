@@ -268,7 +268,9 @@ def make_app(hub, token):
             f = dist / path
             if path and f.is_file() and dist in f.resolve().parents:
                 return FileResponse(f)
-            return FileResponse(dist / "index.html")
+            # always revalidate the page itself: a phone holding an old index.html asks for asset
+            # files a rebuild has already deleted (assets/ names are content hashes, those may cache)
+            return FileResponse(dist / "index.html", headers={"Cache-Control": "no-cache"})
     else:
         @app.get("/")
         def no_ui():

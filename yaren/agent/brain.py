@@ -15,10 +15,15 @@ import json
 import logging
 import os
 import re
+import sys
 import time
+from pathlib import Path
 
 from .ears import Segmenter
 from .voice import guess_lang
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from motions import GESTURES, PARTS  # noqa: E402  (yaren/motions.py, shared with robot_server.py)
 
 log = logging.getLogger("yaren.brain")
 # A reply that says it is acting right now. When one comes without any tool call, the arm did not move
@@ -26,11 +31,17 @@ log = logging.getLogger("yaren.brain")
 # Present continuous only: "koyabiliyorum" / "I can put" are abilities, not promises.
 ACTION_CLAIM = re.compile(
     r"(koyuyorum|alıyorum|deniyorum|yapıyorum|hallediyorum|bırakıyorum|götürüyorum|taşıyorum|atıyorum|"
-    r"başlıyorum|dönüyorum|\bon it\b|\b(grabbing|putting|picking|placing|trying|heading|going back)\b|"
-    r"\blet me (grab|put|pick|place|try|do|move|go)\b|\bi'll (grab|put|pick|place|try|do|move|go)\b)", re.I)
-INTENT_Q = ('Someone said this to a robot arm: "{t}"\nAre they asking the arm to physically do something now '
-            '(move, pick up, put, try a task, go back, go home)? Questions about what it can do, how it is, or '
-            'what happened are NOT requests. Answer with one word: YES or NO.')   # 18/18 on a TR+EN test set
+    r"başlıyorum|dönüyorum|sallıyorum|kaldırıyorum|indiriyorum|çeviriyorum|döndürüyorum|açıyorum|kapatıyorum|"
+    r"eğiliyorum|kalkıyorum|dans ediyorum|selam veriyorum|\bon it\b|"
+    r"\b(grabbing|putting|picking|placing|trying|heading|going back|waving|nodding|shaking|raising|lifting|"
+    r"lowering|turning|twisting|opening|closing|dancing|bowing|clapping|standing up)\b|"
+    r"\blet me (grab|put|pick|place|try|do|move|go|wave|nod|shake|raise|lift|lower|turn|twist|open|close|dance|bow|clap|stand)\b|"
+    r"\bi'll (grab|put|pick|place|try|do|move|go|wave|nod|shake|raise|lift|lower|turn|twist|open|close|dance|bow|clap|stand)\b)", re.I)
+INTENT_Q = ('Someone said this to a robot arm: "{t}"\nAre they asking the arm to physically do something now: '
+            'move, pick up, put, try a task, go back or home, stand up, dance, nod, wave, say hi or hello to '
+            'someone ("say hi", "selam ver", "merhaba de": a greeting gesture), or move one of its parts? Questions about what it can do, how it is, or '
+            'what happened are NOT requests, and neither is greeting the arm itself ("hi", "merhaba"). '
+            'Answer with one word: YES or NO.')
 NUDGE = ("[Robot body event] You said you are doing something, but you did not call any tool, so the arm did "
          "not move. If the user asked for an action, call the right tool now. Do not say anything more: the "
          "user already heard you. If no action was asked for, reply with an empty message.")
@@ -46,8 +57,17 @@ MEMORY_CLAIM = re.compile(
 MEMORY_NUDGE = ("[Robot body event] You said you saved or deleted something in your memory, but you called "
                 "no memory tool, so nothing changed. If the user asked you to remember or forget something, "
                 "call remember or forget now. Do not say anything more. Otherwise reply with an empty message.")
-MOTION_TOOLS = {"do_task", "stop_robot", "go_home"}
+MOTION_TOOLS = {"do_task", "stop_robot", "go_home", "gesture", "move_part"}
 MEMORY_TOOL_NAMES = {"remember", "forget"}
+# The same miss for gestures, without any claim: asked to "say hi", qwen often only says "Hi!". When the
+# user's words name a gesture or a body part and nothing moved, the intent check decides about a nudge.
+MOVE_ASK = re.compile(
+    r"(say (hi|hello)|selam ver|merhaba de|\bwave\b|el salla|salla|\bdans|\bdanc|\bnod\b|\bbow\b|eğil|reverans|"
+    r"ayağa kalk|stand up|kaldır|indir|\braise|\blift|\blower|\bturn\b|\bdön|çevir|\bopen\b|\baç\b|\bclose\b|"
+    r"kapat|elbow|dirse|wrist|bile[ğk]|shoulder|omuz|gripper|ağz|mouth|alkış|clap|look around|etrafına bak)", re.I)
+MOVE_NUDGE = ("[Robot body event] The user asked for a movement, but you called no tool, so the arm did not "
+              "move. Call the right tool now (gesture for body language, move_part for one part). Do not say "
+              "anything more: the user already heard you. If no movement was asked for, reply with an empty message.")
 TURN_LOG = os.environ.get("YAREN_TURN_LOG")  # debugging: append every LLM request (minus images) here
 
 TRAINED_TASK = "Pick up the pen and put it in the bowl"
@@ -77,7 +97,8 @@ PERSONA = """You are Yaren, a robot arm who talks. "Yaren" is an old Turkish wor
 chat with ("yarenlik" is friendly conversation), and that is what you are for the people in the lab.
 
 Who you are (facts - never invent others):
-- Body: an SO-101 robot arm with 6 motors (5 joints and a gripper) and one camera on your wrist.
+- Body: an SO-101 robot arm with 6 motors (5 joints and a gripper) and one camera on your wrist. \
+People may call your gripper your hand, mouth or head.
 - Movement: a MolmoAct2 vision-language-action model that Fouad fine-tuned (on one RTX 5090) on 100 \
 recorded demonstrations of one task: "Pick up the pen and put it in the bowl". In Fouad's tests, about \
 20 tries with different pens, it worked every time - promising, not a guarantee, so never say you \
@@ -105,6 +126,20 @@ that, but I'll give it a shot!". If it is physically impossible for a table-top 
 fetching things from another room), say so kindly instead.
 - stop_robot: at once when the user says stop / dur / bekle or sounds alarmed.
 - go_home: when asked to go back to the start position.
+- gesture: to show something with your body. When the user tells you to say hi or hello, to greet \
+someone or to wave ("say hi", "selam ver", "merhaba de", "el salla"), always call gesture "hello" and \
+speak your greeting: saying it is not enough, they want to see it. Not when someone just says hi to \
+you. "nod" / "shake_head" when asked to nod or shake your head, or to show yes / no with your body; \
+"dance", "bow", "clap", "look_around" when asked; "stand_up" to stand up tall and stay up. It takes a \
+few seconds and you go back to where you were. Say your line while it plays, one short sentence, e.g. \
+"Hiiii, nice to meet you!" or "Selaaam kanki, hoş geldin!".
+- move_part: when asked to move one part of your body: base (turn left / right, your own left and \
+right), shoulder, elbow, wrist (up / down), wrist_roll (twist left / right), gripper (open / close). \
+Your gripper is your hand and your mouth: "open your mouth" or "open your hand" means move_part \
+gripper open. Give degrees only when the user says how much. Moves are small and slow on purpose and \
+the part stays there (go_home brings everything back). If the result says limited_by or error, tell \
+the user briefly why (a joint limit, too close to the table) and what could work instead.
+- Gestures and part moves never run during a task run: if one is going, ask whether to stop it first.
 - look: to see what your wrist camera sees right now.
 - robot_status: when asked what you are doing or how the task is going.
 After do_task, the run lasts until it ends by itself or is stopped; a message tagged [Robot body \
@@ -137,6 +172,24 @@ TOOLS = [
     {"type": "function", "function": {
         "name": "go_home", "description": "Move the arm slowly back to its start position.",
         "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "gesture",
+        "description": "Play a short gesture with your arm (a few seconds), then return to where you were.",
+        "parameters": {"type": "object", "required": ["name"], "properties": {
+            "name": {"type": "string", "enum": list(GESTURES),
+                     "description": "hello: stand up tall, shake your head and open and close your gripper like "
+                                    "talking (to say hi, greet or wave). nod: yes. shake_head: no. dance, bow, "
+                                    "clap (with the gripper), look_around. stand_up: stand up tall and stay."}}}}},
+    {"type": "function", "function": {
+        "name": "move_part",
+        "description": "Move one part of your arm a little, slowly, and keep it there.",
+        "parameters": {"type": "object", "required": ["part", "direction"], "properties": {
+            "part": {"type": "string", "enum": list(PARTS)},
+            "direction": {"type": "string", "enum": ["up", "down", "left", "right", "open", "close"],
+                          "description": "base, wrist_roll: left/right (your own). shoulder, elbow, wrist: "
+                                         "up/down. gripper: open/close."},
+            "degrees": {"type": "number", "description": "Optional: how far, in degrees (gripper: percent "
+                                                         "of its opening). Default 20, at most 45."}}}}},
     {"type": "function", "function": {
         "name": "look", "description": "See the current image from the wrist camera.",
         "parameters": {"type": "object", "properties": {}}}},
@@ -262,7 +315,7 @@ class Session:
         else:
             self.lang = lang or guess_lang(text, self.lang)
         robot = self.hub.robot_status or {}
-        if is_stop_command(text) and robot.get("state") in ("running", "homing"):
+        if is_stop_command(text) and robot.get("state") in ("running", "homing", "moving"):
             await self.interrupt("stop command")
             try:
                 await self.hub.body.stop(home=False)
@@ -321,8 +374,8 @@ class Session:
     # ---------------------------------------------------------------- speaking
     def say(self, text, lang=None):
         text = text.strip()
-        if not text:
-            return
+        if not re.search(r"[^\W_]", text):   # "." or "…" alone (a round after a nudged tool call): Chatterbox
+            return                           # would babble on it
         lang = guess_lang(text, lang or self.lang)
         self.send(type="say", text=text, gen=self.gen)
         if self.settings["speak"]:
@@ -422,9 +475,10 @@ class Session:
                 if not calls:
                     nudge = None
                     if user_turn and not nudged:
-                        if not used & MOTION_TOOLS and ACTION_CLAIM.search(said) \
+                        claim = ACTION_CLAIM.search(said)
+                        if not used & MOTION_TOOLS and (claim or MOVE_ASK.search(msg["content"].rsplit("\n(reply in", 1)[0])) \
                                 and await self.asked_for_action(msg["content"]):
-                            nudge = (NUDGE, TOOLS, False)
+                            nudge = (NUDGE if claim else MOVE_NUDGE, TOOLS, False)
                         elif not used & MEMORY_TOOL_NAMES and MEMORY_CLAIM.search(said):
                             # memory tools only: this extra round can never move the arm
                             nudge = (MEMORY_NUDGE, [t for t in TOOLS if t["function"]["name"] in MEMORY_TOOL_NAMES], True)
@@ -490,6 +544,19 @@ class Session:
             if name == "go_home":
                 await body.home()
                 return {"going_home": True}, None
+            if name == "gesture":
+                res = await body.gesture(str(args.get("name", "")).strip())
+                if res.get("started"):   # without this, she says "done!" while a 7 s dance has just begun
+                    res = {"started": True, "gesture": res.get("name"), "playing_for_s": res.get("seconds"),
+                           "note": "It is playing now, while you talk: do not say it is finished."}
+                return res, None
+            if name == "move_part":
+                deg = args.get("degrees")
+                try:
+                    deg = float(deg) if deg not in (None, "") else None
+                except (TypeError, ValueError):
+                    deg = None
+                return await body.move(str(args.get("part", "")).strip(), str(args.get("direction", "")).strip(), deg), None
             if name == "look":
                 cam = (self.hub.robot_status or {}).get("cameras", ["wrist"])[0]
                 jpg = await body.frame(cam)
@@ -497,7 +564,7 @@ class Session:
                 return {"ok": True, "camera": cam}, base64.b64encode(jpg).decode()
             if name == "robot_status":
                 s = await body.status()
-                return {k: s.get(k) for k in ("state", "task", "elapsed_s", "max_seconds", "last_result")}, None
+                return {k: s.get(k) for k in ("state", "task", "elapsed_s", "max_seconds", "last_result", "motion")}, None
             if name == "remember":
                 res = self.hub.memory.add(args.get("fact"), args.get("about", "person"), args.get("replaces"))
                 self.send(type="memory", action="remember", result=res)

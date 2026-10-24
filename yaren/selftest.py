@@ -29,6 +29,8 @@ LINES = [  # (id, language, text, what should happen)
     ("untrained_tr", "tr", "Kalemi kasenin yanına koy.", "do_task, untrained, says she will try"),
     ("home_en", "en", "Okay, go back to your start position please.", "go_home"),
     ("who_en", "en", "Who built you, and what can you do?", "chat, no tool, facts from the persona"),
+    ("hi_en", "en", "Say hi to my friend Ahmet!", "gesture hello, greets Ahmet while it plays"),
+    ("mouth_tr", "tr", "Ağzını aç.", "move_part gripper open"),
 ]
 
 

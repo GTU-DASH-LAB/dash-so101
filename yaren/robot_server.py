@@ -11,13 +11,16 @@ tools/trt/rollout_trt.py's TensorRT patches) loads the policy, connects the arm 
 max_relative_target, and builds the processors; each control tick is lerobot's send_next_action, as in
 --strategy.type=base. What this adds: the task text can change between runs, runs start and stop on
 request, and the arm returns to the pose it was in at startup after a run (as the run script does
-between --trials attempts).
+between --trials attempts). Between runs it can also play gestures and move single parts (motions.py:
+planned with the SO-101's kinematics, within the demonstrations' joint range and speeds).
 
 API (127.0.0.1 only - the voice server is the only client):
   GET  /status                   state, current task, timings, last result
   POST /task {task, max_seconds} start a run with this instruction (English, as MolmoAct2 was trained)
   POST /stop {home: false}       stop now; the arm holds where it is (home=true: then go home)
   POST /home                     move to the start pose (rate limited, ~2-4 s)
+  POST /gesture {name}           play a gesture of motions.py (hello, nod, ...); not during a run
+  POST /move {part, direction, degrees}   move one part of the arm (motions.py); not during a run
   GET  /camera/<name>.jpg|.mjpg  latest camera frame / MJPEG stream
 
 --dry: no arm, no camera. The robot is replaced by a stand-in that replays a recorded episode of
@@ -27,6 +30,7 @@ without moving anything.
 
 import asyncio
 import collections
+import concurrent.futures
 import logging
 import sys
 import threading
@@ -46,6 +50,7 @@ from pydantic import BaseModel
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "tools" / "trt"))
 
+import motions  # noqa: E402
 import rollout_trt  # noqa: E402
 
 log = logging.getLogger("yaren.robot")
@@ -143,8 +148,9 @@ class Body:
         self.auto_home = auto_home
         self.cams = [k for k, v in self.robot.observation_features.items() if isinstance(v, tuple)]
         self.lock = threading.Lock()
-        self.state = "idle"            # idle | running | homing
-        self.request = None            # ("task", text, max_s) | ("stop", home, reason) | ("home",)
+        self.state = "idle"            # idle | running | homing | moving (a gesture or part move)
+        self.request = None            # ("task", text, max_s) | ("stop", home, reason) | ("home",) |
+                                       # ("gesture", name, future) | ("move", part, direction, degrees, future)
         self.task = None
         self.task_started = 0.0
         self.task_max_s = task_timeout
@@ -158,6 +164,8 @@ class Body:
         self.runs = 0
         self.alive = True
         self._home_plan = None
+        self._motion = None            # (motions.Plan, perf_counter at its start)
+        self.last_motion = None
         self._chunks_before = 0
         self.engine.reset()
         self.engine.start()
@@ -165,7 +173,18 @@ class Body:
     # ---- requests (API threads) ----
     def submit(self, req):
         with self.lock:
-            self.request = req
+            old, self.request = self.request, req
+        if old and isinstance(old[-1], concurrent.futures.Future) and not old[-1].done():
+            old[-1].set_result({"error": "replaced by a newer request before it started"})
+
+    def ask(self, req, timeout=2.0):
+        """Submit a request the control thread answers (it plans from the joints of that very tick)."""
+        fut = concurrent.futures.Future()
+        self.submit(req + (fut,))
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            return {"error": "the arm did not take the request (control loop busy)"}
 
     def status(self):
         with self.lock:
@@ -175,6 +194,7 @@ class Body:
                 "state": self.state, "task": self.task, "elapsed_s": None if el is None else round(el, 1),
                 "max_seconds": self.task_max_s, "last_result": self.last_result, "error": self.error,
                 "recent_results": list(self.recent_results),
+                "motion": self._motion_info(), "last_motion": self.last_motion,
                 "runs": self.runs, "joints": {k: round(v, 1) for k, v in self.joints.items()},
                 "tick_ms_p50": round(float(np.percentile(tick, 50)), 2),
                 "tick_ms_max": round(float(tick.max()), 1),
@@ -182,7 +202,39 @@ class Body:
                 "cameras": self.cams, "fps": self.fps,
             }
 
+    def _motion_info(self):
+        if self.state != "moving" or not self._motion:
+            return None
+        plan, t0 = self._motion
+        return {**plan.summary, "elapsed_s": round(time.perf_counter() - t0, 1)}
+
     # ---- control thread ----
+    def _end_motion(self, how):
+        plan, t0 = self._motion
+        self.last_motion = {"name": plan.name, "ended": how, "seconds": round(time.perf_counter() - t0, 1),
+                            "at": time.time()}
+        log.info("motion %r ended (%s) after %.1f s", plan.name, how, self.last_motion["seconds"])
+        self._motion = None
+        self.state = "idle"
+
+    def _start_motion(self, req, joints):
+        kind, fut = req[0], req[-1]
+        if self.state == "running":
+            fut.set_result({"error": f"a task run is in progress ('{self.task}'); stop it first"})
+            return
+        try:
+            pose = motions.from_obs(joints)
+            plan = motions.plan_gesture(req[1], pose) if kind == "gesture" else motions.plan_move(pose, *req[1:4])
+        except motions.Refused as e:
+            fut.set_result({"error": str(e)})
+            return
+        if self.state == "moving":
+            self._end_motion("replaced")
+        self._motion = (plan, time.perf_counter())
+        self.state = "moving"
+        log.info("motion %r: %.1f s %s", plan.name, plan.seconds, plan.summary)
+        fut.set_result({"started": True, **plan.summary})
+
     def _finish(self, how):
         dur = round(time.time() - self.task_started, 1)
         self.last_result = {"task": self.task, "ended": how, "seconds": dur, "at": time.time()}
@@ -200,6 +252,11 @@ class Body:
 
     def _apply_request(self, req, joints):
         kind = req[0]
+        if kind in ("gesture", "move"):
+            self._start_motion(req, joints)
+            return
+        if self.state == "moving":
+            self._end_motion("stopped" if kind == "stop" else "replaced")
         if kind == "task":
             if self.state == "running":
                 self._finish("replaced")
@@ -277,6 +334,14 @@ class Body:
                         with self.lock:
                             if self.state == "homing":
                                 self.state = "idle"
+                elif state == "moving":
+                    plan, t_m = self._motion
+                    t = time.perf_counter() - t_m
+                    self.robot.send_action(motions.to_action(plan.at(t)))
+                    if t >= plan.seconds:
+                        with self.lock:
+                            if self.state == "moving":
+                                self._end_motion("done")
                 # idle: send nothing, the servos hold their last goal
                 frames = {}
                 if n % 2 == 0:   # 15 fps preview
@@ -295,7 +360,9 @@ class Body:
                     self.error = f"{type(e).__name__}: {e}"
                     if self.state == "running":
                         self._finish("error")
-                    self.state = "idle"     # a failed homing stops too: hold, report, wait
+                    if self.state == "moving":
+                        self._end_motion("error")
+                    self.state = "idle"     # a failed homing or gesture stops too: hold, report, wait
                 time.sleep(0.2)
             dt = time.perf_counter() - t0
             with self.lock:
@@ -352,6 +419,16 @@ class TaskReq(BaseModel):
     max_seconds: float | None = None
 
 
+class GestureReq(BaseModel):
+    name: str
+
+
+class MoveReq(BaseModel):
+    part: str
+    direction: str
+    degrees: float | None = None   # gripper: percentage points of its opening; None: open/close fully
+
+
 class StopReq(BaseModel):
     home: bool = False
     reason: Literal["stopped", "done"] | None = None   # "done": the voice side's camera check ended it
@@ -392,6 +469,14 @@ def make_app(body, dry):
     def home():
         body.submit(("home",))
         return {"ok": True}
+
+    @app.post("/gesture")
+    def gesture(req: GestureReq):
+        return body.ask(("gesture", req.name.strip().lower()))
+
+    @app.post("/move")
+    def move(req: MoveReq):
+        return body.ask(("move", req.part.strip().lower(), req.direction.strip().lower(), req.degrees))
 
     def frame(name):
         with body.lock:

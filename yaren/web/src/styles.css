@@ -97,6 +97,7 @@ section { min-height: 0; }
 .robot-chip { position: absolute; top: 10px; right: 12px; font-size: 13px; font-weight: 700; padding: 5px 12px; border-radius: 999px; background: #0b1020cc; border: 1px solid var(--line); }
 .robot-chip.running { background: var(--red); border-color: var(--red); box-shadow: 0 0 18px #ff2d5588; }
 .robot-chip.homing { background: var(--blue); border-color: var(--blue); }
+.robot-chip.moving { background: var(--blue); border-color: var(--blue); box-shadow: 0 0 18px #2f6bff88; }
 .robot-chip.offline { color: var(--muted); }
 .task-overlay { position: absolute; left: 12px; right: 12px; bottom: 12px; background: #0b1020d9; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; align-items: center; }
 .task-text { font-weight: 600; }
@@ -109,6 +110,8 @@ section { min-height: 0; }
 .stop { flex: 1; background: var(--red); border-color: var(--red); color: white; font-weight: 800; font-size: 20px; letter-spacing: .12em; padding: 14px; box-shadow: 0 8px 30px #ff2d5555; }
 .stop:hover { filter: brightness(1.1); border-color: #fff4; }
 .stop small { font-size: 11px; opacity: .75; letter-spacing: 0; margin-left: 6px; }
+.head-stop { display: none; }
+header { position: sticky; top: 0; z-index: 8; }
 
 /* ---------- chat ---------- */
 .chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
@@ -145,6 +148,8 @@ blockquote { margin: 0; padding: 12px 14px; background: var(--panel-2); border-l
   .left .controls { grid-column: 1 / -1; margin-top: 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
   .cam { flex: none; aspect-ratio: 4 / 3; min-height: 0; max-height: 70vh; }
   .right { height: 70vh; min-height: 380px; }
+  .head-stop { display: inline-flex; flex: none; order: 2; margin-left: auto; font-size: 15px; padding: 8px 18px; letter-spacing: .08em; }
+  .chips { order: 3; }
 }
 @media (max-width: 520px) {
   header { padding: 8px 12px; gap: 10px; }
