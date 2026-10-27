@@ -38,8 +38,8 @@ class Body:
         r.raise_for_status()
         return r.json()
 
-    async def guide(self, on=True):
-        r = await self.http.post("/guide", json={"on": on})
+    async def guide(self, on=True, level=None):
+        r = await self.http.post("/guide", json={"on": on, "level": level})
         r.raise_for_status()
         return r.json()
 

@@ -174,3 +174,6 @@ blockquote { margin: 0; padding: 12px 14px; background: var(--panel-2); border-l
 .mem-entry button { padding: 2px 8px; }
 .mem-run { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; border-left: 2px solid var(--line); }
 .mem-run small, .mem-empty { color: var(--muted); }
+
+.stiff { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: #f5a524; }
+.stiff input { width: 140px; accent-color: #f5a524; }

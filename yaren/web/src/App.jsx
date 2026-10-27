@@ -337,6 +337,12 @@ export default function App() {
             <button className="ghost" onClick={() => send({ type: "home" })}>⌂ {t.home}</button>
             <button className={`ghost ${rstate === "guiding" ? "on" : ""}`} title={t.guideHint}
               onClick={() => send({ type: "guide", on: rstate !== "guiding" })}>✋ {t.guide}</button>
+            {rstate === "guiding" && (
+              <label className="stiff">{t.stiffness} {Math.round((robot.guide_level ?? 0.4) * 100)}%
+                <input type="range" min="10" max="100" step="5" defaultValue={Math.round((robot.guide_level ?? 0.4) * 100)}
+                  onChange={(e) => send({ type: "guide", on: true, level: Number(e.target.value) / 100 })} />
+              </label>
+            )}
             <button className="ghost" onClick={() => { player.current?.stop(); send({ type: "hush" }); }}>🤫 {t.hush}</button>
           </div>
         </section>

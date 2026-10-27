@@ -142,8 +142,9 @@ the part stays there (go_home brings everything back). If the result says limite
 the user briefly why (a joint limit, too close to the table) and what could work instead.
 - hand_guide: on when someone wants to move you with their hands (hand-guiding, "gravity \
 compensation", "seni elle oynatayım"): you keep holding your weight, follow their push, and stay where \
-they leave you (a few degrees of springback is normal). Off when they are done; stop, go_home, a task \
-or a gesture also end it.
+they leave you (a few degrees of springback is normal). If they say you are too stiff, call it again \
+with a lower stiffness (default 0.4); if you sink by yourself, higher. Off when they are done; stop, \
+go_home, a task or a gesture also end it.
 - Gestures, part moves and hand-guiding never run during a task run: if one is going, ask whether to \
 stop it first.
 - look: to see what your wrist camera sees right now.
@@ -200,7 +201,9 @@ TOOLS = [
         "name": "hand_guide",
         "description": "Hand-guiding: people can push your arm by hand; you follow and hold where they leave you.",
         "parameters": {"type": "object", "required": ["on"], "properties": {
-            "on": {"type": "boolean", "description": "true: start hand-guiding. false: stop it (you hold the pose)."}}}}},
+            "on": {"type": "boolean", "description": "true: start hand-guiding. false: stop it (you hold the pose)."},
+            "stiffness": {"type": "number", "description": "Optional, 0.1-1: how hard you resist (default 0.4). "
+                                                           "Lower when they say you are too stiff, higher if you sag."}}}}},
     {"type": "function", "function": {
         "name": "look", "description": "See the current image from the wrist camera.",
         "parameters": {"type": "object", "properties": {}}}},
@@ -377,10 +380,14 @@ class Session:
         self.send(type="tool", name="stop_robot", args={}, result={"button": True})
         self._settle()
 
-    async def guide_button(self, on):
-        res = await self.hub.body.guide(on)
+    async def guide_button(self, on, level=None):
+        was = (self.hub.robot_status or {}).get("state") == "guiding"
+        res = await self.hub.body.guide(on, level)
         if res.get("error"):
             self.send(type="error", message=f"hand-guiding: {res['error']}")
+        elif on and was:      # only the stiffness slider moved
+            self.send(type="tool", name="hand_guide", args={"on": on, "stiffness": level}, result={**res, "button": True})
+            return
         elif on:
             self.body_note("The user switched hand-guiding on with the button: they can move your arm by hand.")
         else:
@@ -579,7 +586,12 @@ class Session:
                     deg = None
                 return await body.move(str(args.get("part", "")).strip(), str(args.get("direction", "")).strip(), deg), None
             if name == "hand_guide":
-                return await body.guide(bool(args.get("on", True))), None
+                lvl = args.get("stiffness")
+                try:
+                    lvl = float(lvl) if lvl not in (None, "") else None
+                except (TypeError, ValueError):
+                    lvl = None
+                return await body.guide(bool(args.get("on", True)), lvl), None
             if name == "look":
                 cam = (self.hub.robot_status or {}).get("cameras", ["wrist"])[0]
                 jpg = await body.frame(cam)

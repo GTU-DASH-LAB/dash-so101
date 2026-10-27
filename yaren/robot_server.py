@@ -21,7 +21,8 @@ API (127.0.0.1 only - the voice server is the only client):
   POST /home                     move to the start pose (rate limited, ~2-4 s)
   POST /gesture {name}           play a gesture of motions.py (hello, nod, ...); not during a run
   POST /move {part, direction, degrees}   move one part of the arm (motions.py); not during a run
-  POST /guide {on}               hand-guiding: push the arm and it follows, let go and it holds (motions.Guide)
+  POST /guide {on, level}        hand-guiding: push the arm and it follows, let go and it holds (motions.Guide);
+                                 level = stiffness, the fraction of each motor's torque limit (0.1-1, default 0.4)
   GET  /camera/<name>.jpg|.mjpg  latest camera frame / MJPEG stream
 
 --dry: no arm, no camera. The robot is replaced by a stand-in that replays a recorded episode of
@@ -59,6 +60,8 @@ JPEG_QUALITY = 80
 HOME_SPEED_DEG_S = 45.0       # homing: straight-line interpolation at this speed (lerobot's own
 HOME_MIN_S = 1.5              # return-to-start uses 3 s whatever the distance)
 HOME_EPS_DEG = 1.0
+GUIDE_LEVEL = 0.4             # hand-guiding: torque limit as a fraction of the motors' own (RAM register,
+GUIDE_LEVEL_MIN = 0.1         # power-on value restored when guiding ends). At 1.0 a hand cannot push the arm.
 
 
 def pop_opt(name, default=None, flag=False):
@@ -152,7 +155,7 @@ class Body:
         self.state = "idle"            # idle | running | homing | moving (a gesture or part move) | guiding
         self.request = None            # ("task", text, max_s) | ("stop", home, reason) | ("home",) |
                                        # ("gesture", name, future) | ("move", part, direction, degrees, future)
-                                       # | ("guide", on, future)
+                                       # | ("guide", on, level, future)
         self.task = None
         self.task_started = 0.0
         self.task_max_s = task_timeout
@@ -169,6 +172,11 @@ class Body:
         self._motion = None            # (motions.Plan, perf_counter at its start)
         self.last_motion = None
         self._guide = None             # motions.Guide while hand-guiding
+        self.guide_level = GUIDE_LEVEL
+        self.guide_load = None         # Present_Load (0.1 % of max torque) while guiding, for tuning
+        self._saved_torque = None      # Torque_Limit per motor before guiding lowered it
+        inner = getattr(self.robot, "inner", None)
+        self.bus = getattr(inner, "bus", None)    # None in --dry
         self._chunks_before = 0
         self.engine.reset()
         self.engine.start()
@@ -198,6 +206,7 @@ class Body:
                 "max_seconds": self.task_max_s, "last_result": self.last_result, "error": self.error,
                 "recent_results": list(self.recent_results),
                 "motion": self._motion_info(), "last_motion": self.last_motion,
+                "guide_level": self.guide_level, "guide_load": self.guide_load,
                 "runs": self.runs, "joints": {k: round(v, 1) for k, v in self.joints.items()},
                 "tick_ms_p50": round(float(np.percentile(tick, 50)), 2),
                 "tick_ms_max": round(float(tick.max()), 1),
@@ -238,21 +247,55 @@ class Body:
         log.info("motion %r: %.1f s %s", plan.name, plan.seconds, plan.summary)
         fut.set_result({"started": True, **plan.summary})
 
-    def _set_guide(self, on, joints, fut=None):
+    def _soften(self, level):
+        """Lower every motor's torque limit to `level` of its own value (Torque_Limit is a RAM register)."""
+        if self.bus is None:
+            return
+        if self._saved_torque is None:
+            self._saved_torque = {m: int(self.bus.read("Torque_Limit", m, normalize=False)) for m in self.bus.motors}
+            log.info("torque limits before guiding: %s", self._saved_torque)
+        for m, full in self._saved_torque.items():
+            self.bus.write("Torque_Limit", m, max(1, int(round(full * level))), normalize=False)
+
+    def _restore_torque(self):
+        if self.bus is None or self._saved_torque is None:
+            return
+        for m, full in self._saved_torque.items():
+            self.bus.write("Torque_Limit", m, full, normalize=False)
+        log.info("torque limits restored: %s", self._saved_torque)
+        self._saved_torque = None
+
+    def _set_guide(self, on, joints, fut=None, level=None):
         res = {"guiding": bool(on)}
-        if on and self.state == "running":
-            res = {"error": f"a task run is in progress ('{self.task}'); stop it first"}
-        elif on:
-            if self.state == "moving":
-                self._end_motion("replaced")
-            if self.state != "guiding":
-                self._guide = motions.Guide(motions.from_obs(joints))
-                log.info("hand-guiding on")
-            self.state = "guiding"
-        elif self.state == "guiding":
-            self._guide = None
-            self.state = "idle"
-            log.info("hand-guiding off")
+        try:
+            if on and self.state == "running":
+                res = {"error": f"a task run is in progress ('{self.task}'); stop it first"}
+            elif on:
+                if level is not None:
+                    self.guide_level = min(1.0, max(GUIDE_LEVEL_MIN, float(level)))
+                if self.state == "moving":
+                    self._end_motion("replaced")
+                if self.state != "guiding":
+                    self._guide = motions.Guide(motions.from_obs(joints))
+                    log.info("hand-guiding on, stiffness %.0f %%", self.guide_level * 100)
+                self._soften(self.guide_level)
+                self.state = "guiding"
+                res["level"] = self.guide_level
+            elif self.state == "guiding":
+                self._guide = None
+                self.guide_load = None
+                self.state = "idle"
+                self.robot.send_action(motions.to_action(motions.from_obs(joints)))   # hold right here, so
+                self._restore_torque()                                                # full torque snaps nothing
+                log.info("hand-guiding off")
+        except Exception as e:  # noqa: BLE001 - a failed register write: full torque, not guiding
+            log.exception("hand-guiding switch failed")
+            self._guide, self.state = None, "idle"
+            try:
+                self._restore_torque()
+            except Exception:  # noqa: BLE001
+                log.exception("could not restore torque limits (they come back at power-off)")
+            res = {"error": f"{type(e).__name__}: {e}"}
         if fut:
             fut.set_result(res)
 
@@ -274,7 +317,7 @@ class Body:
     def _apply_request(self, req, joints):
         kind = req[0]
         if kind == "guide":
-            self._set_guide(req[1], joints, req[2])
+            self._set_guide(req[1], joints, req[3], req[2])
             return
         if self.state == "guiding":    # anything else ends hand-guiding; the arm holds where it is
             self._set_guide(False, joints)
@@ -369,7 +412,16 @@ class Body:
                             if self.state == "moving":
                                 self._end_motion("done")
                 elif state == "guiding":
-                    self.robot.send_action(motions.to_action(self._guide.step(motions.from_obs(joints))))
+                    goal = self._guide.step(motions.from_obs(joints))
+                    self.robot.send_action(motions.to_action(goal))
+                    if self.bus is not None and n % 3 == 0:
+                        load = self.bus.sync_read("Present_Load", normalize=False)
+                        with self.lock:
+                            self.guide_load = load
+                        if n % 30 == 0:
+                            log.info("guide %.0f%% pos %s goal %s load %s", self.guide_level * 100,
+                                     {k.removesuffix('.pos')[:5]: round(v, 1) for k, v in joints.items()},
+                                     {k[:5]: round(v, 1) for k, v in goal.items()}, load)
                 # idle: send nothing, the servos hold their last goal
                 frames = {}
                 if n % 2 == 0:   # 15 fps preview
@@ -390,7 +442,12 @@ class Body:
                         self._finish("error")
                     if self.state == "moving":
                         self._end_motion("error")
-                    self._guide = None
+                    if self._guide is not None:
+                        self._guide = None
+                        try:
+                            self._restore_torque()
+                        except Exception:  # noqa: BLE001
+                            log.exception("could not restore torque limits (they come back at power-off)")
                     self.state = "idle"     # a failed homing, gesture or guiding stops too: hold, report, wait
                 time.sleep(0.2)
             dt = time.perf_counter() - t0
@@ -406,6 +463,10 @@ class Body:
 
         self.alive = False
         time.sleep(0.2)
+        try:
+            self._restore_torque()       # full torque before the trip back to the start pose
+        except Exception:  # noqa: BLE001
+            log.exception("could not restore torque limits")
         try:
             self.engine.stop()
         finally:
@@ -460,6 +521,7 @@ class MoveReq(BaseModel):
 
 class GuideReq(BaseModel):
     on: bool = True
+    level: float | None = None     # stiffness: fraction of the motors' torque limit, 0.1-1
 
 
 class StopReq(BaseModel):
@@ -513,7 +575,7 @@ def make_app(body, dry):
 
     @app.post("/guide")
     def guide(req: GuideReq):
-        return body.ask(("guide", req.on))
+        return body.ask(("guide", req.on, req.level))
 
     def frame(name):
         with body.lock:
