@@ -118,9 +118,12 @@ class Plan:
     def __init__(self, name, start, keyframes, summary=None):
         self.name, self.start, self.segs = name, dict(start), []
         t, prev = 0.0, dict(start)
-        for pose, speeds, hold, home in keyframes:
+        for kf in keyframes:
+            pose, speeds, hold, home = kf[:4]
             pose = {**prev, **pose}
             T = _duration(prev, pose, speeds) if speeds is not GENTLE else max(MIN_MOVE_S, _duration(prev, pose, speeds))
+            if len(kf) > 4 and kf[4]:           # a fixed length (on the beat), never faster than allowed
+                T = max(T, kf[4])
             self.segs.append((t, T, prev, pose, home))
             t += T
             if hold:
@@ -153,8 +156,8 @@ class Plan:
         return worst
 
 
-def _kf(pose, lively=False, hold=0.0, home=False, speeds=None):
-    return (pose, speeds or (LIVELY if lively else SPEED), hold, home)
+def _kf(pose, lively=False, hold=0.0, home=False, speeds=None, dur=None):
+    return (pose, speeds or (LIVELY if lively else SPEED), hold, home, dur)
 
 
 def _shake(U, n, amp_pan=15.0, amp_roll=20.0, talk=False):
@@ -297,6 +300,126 @@ def plan_move(start, part, direction, degrees=None):
     return Plan(f"{part} {direction}", S, [_kf({joint: target}, speeds=GENTLE)], summary)
 
 
+# ---------------------------------------------------------------- named poses
+# survey: the pose the demonstrations look around from before reaching (so101_pen_in_bowl_wrist episode 7,
+# frame 169): tip 16 cm above the table, the wrist camera looking down at the pen and the bowl. portrait:
+# standing, the gripper (and its camera) pointing forward and ~15 deg up, tip ~36 cm high: faces, photos.
+POSES = {
+    "survey": {"shoulder_lift": -48.7, "elbow_flex": 8.3, "wrist_flex": 102.0},
+    "portrait": {"shoulder_lift": -30.0, "elbow_flex": -60.0, "wrist_flex": 75.0},
+}
+
+
+def plan_pose(name, start, gentle=False):
+    """Go to a named pose and stay (base, wrist roll and gripper keep their angles)."""
+    if name not in POSES:
+        raise Refused(f"unknown pose '{name}'; known: {', '.join(POSES)}")
+    S = {j: float(start[j]) for j in JOINTS}
+    return _check(Plan(name, S, [_kf(clamp({**S, **POSES[name]}), speeds=GENTLE if gentle else None)]),
+                  f"going to the {name} pose")
+
+
+def near_pose(name, pose, tol=4.0):
+    return all(abs(pose[j] - v) <= tol for j, v in POSES[name].items())
+
+
+# ---------------------------------------------------------------- body language
+# Small moves around wherever the arm is (only when it is up: tip >= 10 cm), back to that pose after.
+EXPRESS_MIN_TIP_M = 0.10
+
+
+def _x_nod(S):
+    w = S["wrist_flex"]
+    return [_kf(clamp({"wrist_flex": w + d})) for d in (10, -3, 10)]
+
+
+def _x_tilt(S):        # curious, a question
+    return [_kf(clamp({"wrist_roll": S["wrist_roll"] + 18}), hold=0.5)]
+
+
+def _x_shake(S):       # no, sorry
+    p = S["shoulder_pan"]
+    return [_kf(clamp({"shoulder_pan": p + d}), lively=True) for d in (8, -8, 8, -8)]
+
+
+def _x_bounce(S):      # excited
+    lift, w = S["shoulder_lift"], S["wrist_flex"]
+    return [_kf(clamp({"shoulder_lift": lift + d, "wrist_flex": w - d}), lively=True) for d in (-6, 2, -6, 2)]
+
+
+def _x_droop(S):       # sad
+    return [_kf(clamp({"wrist_flex": S["wrist_flex"] + 18}), speeds=GENTLE, hold=0.8)]
+
+
+def _x_wiggle(S):      # laughing
+    r = S["wrist_roll"]
+    return [_kf(clamp({"wrist_roll": r + d}), lively=True) for d in (12, -12, 12, -12)]
+
+
+EXPRESSIONS = {"nod": _x_nod, "tilt": _x_tilt, "shake": _x_shake, "bounce": _x_bounce, "droop": _x_droop,
+               "wiggle": _x_wiggle}
+
+
+def plan_express(kind, start):
+    if kind not in EXPRESSIONS:
+        raise Refused(f"unknown expression '{kind}'; known: {', '.join(EXPRESSIONS)}")
+    S = {j: float(start[j]) for j in JOINTS}
+    if _tip_z(S) < EXPRESS_MIN_TIP_M:
+        raise Refused("I am folded down; body language only when I am up")
+    return _check(Plan(f"express {kind}", S, EXPRESSIONS[kind](S) + [_kf(S, home=True)]), f"the {kind} move")
+
+
+# ---------------------------------------------------------------- dancing to a beat
+# Every move lasts a whole number of beats (claps half a beat): a move too big to fit its beats at the
+# lively speeds is scaled down to fit, so the arm stays on the music instead of lagging behind it.
+DANCE_BPM = (80, 130)
+DANCE_POSE = {**STAND, "wrist_flex": 20.0}
+DANCE_MOVES = {  # name: [(offsets from the dance pose, beats), ...]
+    "sway": [({"shoulder_pan": 15, "wrist_roll": -20}, 2), ({"shoulder_pan": -15, "wrist_roll": 20}, 2)],
+    "bob": [({"wrist_flex": 20}, 1), ({"wrist_flex": -8}, 1)] * 2,
+    "twist": [({"wrist_roll": 35}, 1), ({"wrist_roll": -35}, 1)],
+    "clap": [({"gripper": 35}, 0.5), ({"gripper": 0}, 0.5)] * 2,
+    "lean": [({"shoulder_lift": 12, "wrist_flex": 15}, 2), ({"shoulder_lift": -8, "wrist_flex": -10}, 2)],
+    "groove": [({"shoulder_pan": 12, "wrist_flex": 15}, 1), ({"shoulder_pan": -12, "wrist_flex": -5}, 1)],
+}
+DANCE_ORDER = ["sway", "bob", "groove", "clap", "twist", "lean", "bob", "sway", "groove", "twist", "clap", "lean"]
+
+
+def _fit(prev, pose, T, speeds=LIVELY):
+    need = _duration(prev, pose, speeds)
+    f = min(1.0, T / need) if need > 0 else 1.0
+    return {j: prev[j] + (pose[j] - prev[j]) * f for j in prev}
+
+
+def plan_dance(start, bpm, beats):
+    """Stand up (a whole number of beats: the music's intro), dance `beats` beats, then go back to the
+    start pose (the music's outro). summary: intro_beats, beats, outro_s for the music."""
+    bpm = min(max(float(bpm), DANCE_BPM[0]), DANCE_BPM[1])
+    beat = 60.0 / bpm
+    S = {j: float(start[j]) for j in JOINTS}
+    U = clamp({**S, **DANCE_POSE})
+    intro = max(2, math.ceil(_duration(S, U, SPEED) / beat))
+    frames, prev, done, k = [_kf(U, dur=intro * beat)], U, 0.0, 0
+    while done < beats - 1e-9:
+        for off, n in DANCE_MOVES[DANCE_ORDER[k % len(DANCE_ORDER)]]:
+            n = math.ceil(max(n, MIN_SEGMENT_S / beat) * 2 - 1e-9) / 2   # half-beat claps: whole beats when fast
+            if done + n > beats + 1e-9:
+                break
+            pose = _fit(prev, clamp({**U, **{j: U[j] + d for j, d in off.items()}}), n * beat)
+            frames.append(_kf(pose, lively=True, dur=n * beat))
+            prev, done = pose, done + n
+        else:
+            k += 1
+            continue
+        break
+    frames.append(_kf(U, lively=True, dur=max(1.0, math.ceil(_duration(prev, U, LIVELY) / beat)) * beat))
+    up_s = sum(seg[1] for seg in Plan("x", S, frames).segs)
+    frames.append(_kf(S, home=True))
+    plan = Plan("dance", S, frames, {"bpm": round(bpm, 1), "intro_beats": intro, "beats": round(done, 1)})
+    plan.summary["outro_s"] = round(plan.seconds - up_s, 2)
+    return _check(plan, "dancing")
+
+
 def to_action(pose):
     return {f"{j}.pos": float(v) for j, v in pose.items()}
 
@@ -329,3 +452,130 @@ class Guide:
             if abs(d) > db:
                 self.goal[j] = present[j] - math.copysign(db / 2, d)
         return dict(self.goal)
+
+
+# ---------------------------------------------------------------- taught motions (teach / replay)
+# Taught by pushing the arm (hand-guiding) or by moving the leader arm (mirroring): the follower's
+# measured joints at the control rate. Replayed as recorded after a calm lead-in from wherever the arm
+# is, inside the demonstrations' joint envelope (the gripper may open fully) and no faster than the
+# lively speeds: a motion taught faster is slowed down as a whole. It may go as low as the recording
+# itself did - that height was shown by hand - but never lower; the lead-in keeps the usual clearance.
+TAUGHT_MAX_S = 60.0
+TAUGHT_MIN_S = 0.5
+TAUGHT_LIMITS = {**LIMITS, "gripper": (0.0, 100.0)}
+SPEED_FACTORS = (0.5, 1.5)
+
+
+def _taught_clamp(pose):
+    return {j: min(max(v, TAUGHT_LIMITS[j][0]), TAUGHT_LIMITS[j][1]) for j, v in pose.items()}
+
+
+class Trajectory:
+    """A lead-in Plan, then the recorded frames every dt seconds (linear in between). Same interface as
+    Plan where robot_server.py and the tests use it: name, seconds, end, summary, at(t), lowest()."""
+
+    def __init__(self, name, lead, frames, dt, floor, summary):
+        self.name, self.lead, self.frames, self.dt, self.floor = name, lead, frames, dt, floor
+        self.seconds = lead.seconds + (len(frames) - 1) * dt
+        self.end = dict(frames[-1])
+        self.segs = lead.segs
+        self.summary = {"name": name, "seconds": round(self.seconds, 2), **summary}
+
+    def at(self, t):
+        if t < self.lead.seconds:
+            return self.lead.at(t)
+        x = (t - self.lead.seconds) / self.dt
+        i = int(x)
+        if i >= len(self.frames) - 1:
+            return dict(self.end)
+        a, b, f = self.frames[i], self.frames[i + 1], x - i
+        return {j: a[j] + (b[j] - a[j]) * f for j in a}
+
+    def lowest(self, dt=1 / 30):
+        bad = self.lead.lowest(dt)
+        if bad:
+            return bad
+        for k, pose in enumerate(self.frames):
+            for name, p in points(pose).items():
+                below = self.floor[name] - TOLERANCE_M - p[2]
+                if below > 0:
+                    return (below, self.lead.seconds + k * self.dt, name)
+        return None
+
+
+def recording_frames(rec, rate=30.0):
+    """The recording resampled to `rate` Hz and lightly smoothed (5 frames, servo jitter): poses."""
+    ts = np.array([f[0] for f in rec["frames"]], float)
+    qs = np.array([f[1] for f in rec["frames"]], float)
+    if len(ts) < 2:
+        raise Refused("that recording is empty")
+    grid = np.arange(0.0, ts[-1] - ts[0] + 1e-9, 1.0 / rate) + ts[0]
+    q = np.stack([np.interp(grid, ts, qs[:, i]) for i in range(len(JOINTS))], 1)
+    if len(q) >= 5:
+        k = np.ones(5) / 5
+        pad = np.pad(q, ((2, 2), (0, 0)), mode="edge")
+        q = np.stack([np.convolve(pad[:, i], k, mode="valid") for i in range(len(JOINTS))], 1)
+    return [dict(zip(JOINTS, map(float, row))) for row in q]
+
+
+def plan_replay(start, rec, speed=1.0):
+    """rec: {"name", "frames": [[t, [6 joints]], ...]} as robot_server.py saves it."""
+    frames = recording_frames(rec)
+    S = {j: float(start[j]) for j in JOINTS}
+    floor = {n: min(CLEARANCE_M, min(points(f)[n][2] for f in frames)) for n in ("elbow", "wrist", "tip")}
+    clamped = [_taught_clamp(f) for f in frames]
+    was_clamped = any(abs(a[j] - b[j]) > 0.5 for a, b in zip(frames, clamped) for j in JOINTS)
+    speed = min(max(float(speed or 1.0), SPEED_FACTORS[0]), SPEED_FACTORS[1])
+    q = np.array([[f[j] for j in JOINTS] for f in clamped])
+    vmax = np.abs(np.diff(q, axis=0)).max(0) * 30.0 if len(q) > 1 else np.zeros(len(JOINTS))
+    allowed = min([speed] + [LIVELY[j] / v for j, v in zip(JOINTS, vmax) if v > 1e-6])
+    dt = 1.0 / 30.0 / allowed
+    lead = _check(Plan("lead-in", S, [_kf(clamped[0], speeds=GENTLE)]), "getting to where that motion starts")
+    traj = Trajectory(rec.get("name", "taught"), lead, clamped, dt, floor,
+                      {"speed": round(float(allowed), 2), "slowed_down": bool(allowed < speed - 1e-6),
+                       "clamped_to_limits": bool(was_clamped), "taught_s": round((len(clamped) - 1) / 30.0, 1)})
+    bad = traj.lowest()
+    if bad:
+        raise Refused(f"replaying that from here would bring my {bad[2]} closer to the table than when "
+                      "you taught it")
+    return traj
+
+
+class Follow:
+    """Mirroring: the command chases a moving target (the leader arm), each joint no faster than
+    `speeds`, inside the taught-motion limits."""
+
+    def __init__(self, start, speeds=LIVELY):
+        self.cmd = {j: float(start[j]) for j in JOINTS}
+        self.speeds = speeds
+
+    def step(self, target, dt):
+        for j in JOINTS:
+            goal = _taught_clamp({j: target[j]})[j]
+            v = self.speeds[j] * dt
+            self.cmd[j] += max(-v, min(v, goal - self.cmd[j]))
+        return dict(self.cmd)
+
+    def gap(self, target):
+        return max(abs(_taught_clamp({j: target[j]})[j] - self.cmd[j]) for j in JOINTS)
+
+
+# ---------------------------------------------------------------- following a face
+# From the portrait pose: base pan turns toward the face, wrist flex tilts toward it. ex, ey: the face
+# centre's offset from the image centre in the upright image, -1..1 (+x right, +y down). Turning right
+# is +pan (PARTS), tilting down is +wrist_flex (the gripper points from up, through forward, to down as
+# wrist_flex grows). robot_server.py flips a sign if the error keeps growing anyway (a mirrored camera).
+TRACK_GAIN = 30.0         # deg/s per unit of image error
+TRACK_DEADBAND = 0.08
+TRACK_WRIST = (40.0, 102.0)
+
+
+def track_step(pose, ex, ey, dt, sx=1, sy=1):
+    p = dict(pose)
+    for j, e, sg in (("shoulder_pan", ex, sx), ("wrist_flex", ey, sy)):
+        if abs(e) > TRACK_DEADBAND:
+            v = GENTLE[j] * dt
+            p[j] += max(-v, min(v, sg * TRACK_GAIN * e * dt))
+    p = clamp(p)
+    p["wrist_flex"] = min(max(p["wrist_flex"], TRACK_WRIST[0]), TRACK_WRIST[1])
+    return p

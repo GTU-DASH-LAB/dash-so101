@@ -80,9 +80,14 @@ done
     grep -v '^PORTS ' "$RUN_DIR/hw_check.out"
     [ $rc -eq 0 ] || die "Hardware check failed - fix the FAIL lines above and run again."
     FOLLOWER_PORT="$(sed -n 's/^PORTS.*follower=\([^ ]*\).*/\1/p' "$RUN_DIR/hw_check.out")"
+    # the leader arm (optional: mirroring and teaching with it), found by its USB serial like the follower
+    LEADER_PORT=""
+    for d in /dev/serial/by-id/*"${LEADER_SERIAL:-none}"*; do [ -e "$d" ] && LEADER_PORT="$(readlink -f "$d")"; done
+    [ -n "$LEADER_PORT" ] && EXTRA+=(--leader-port "$LEADER_PORT" --leader-id "$LEADER_ID")
   fi
   info "Policy: $POLICY  (task it was trained on: \"$TASK\")"
   info "Arm: $( [ "$DRY" = true ] && echo 'NONE (--dry, replaying a recorded episode)' || echo "$FOLLOWER_PORT" ), max $MAX_RELATIVE_TARGET deg/tick per joint"
+  [ "$DRY" = true ] || info "Leader arm: ${LEADER_PORT:-not found (mirroring and teaching with it are off)}"
   HF_HUB_OFFLINE=1 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$ROBOT_GPU" PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     nohup "$PY" "$YAREN/robot_server.py" --port "$ROBOT_HTTP_PORT" --task-timeout "$TASK_TIMEOUT_S" "${EXTRA[@]}" \
       --robot.type=so101_follower --robot.port="$FOLLOWER_PORT" --robot.id="$FOLLOWER_ID" \

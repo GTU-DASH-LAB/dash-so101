@@ -6,6 +6,7 @@ moment of grasping, standing) and sampled at the control rate (30 Hz): joint lim
 clearance above the table, the return to the start pose, and what up/down/left/right mean.
 """
 
+import json
 import math
 import sys
 import xml.etree.ElementTree as ET
@@ -176,6 +177,95 @@ def test_guide():
     assert g.goal["elbow_flex"] == held
     # springback on release: the trailing distance plus gravity's sag, at most one deadband + 4.18 deg
     assert abs(pos["elbow_flex"] - hand["elbow_flex"]) <= M.GUIDE_DEADBAND["elbow_flex"] + 4.18 + 1e-6
+
+
+def test_poses_and_expressions():
+    for sname, start in STARTS.items():
+        for name in M.POSES:
+            plan = M.plan_pose(name, start)
+            check_plan(plan, start, False)
+            assert M.near_pose(name, plan.end, 0.01)
+    up = M.plan_pose("portrait", REST).end
+    assert M.points(up)["tip"][2] > 0.3
+    for kind in M.EXPRESSIONS:
+        check_plan(M.plan_express(kind, up), up, True)
+        try:
+            M.plan_express(kind, REST)          # folded down: no body language
+        except M.Refused:
+            pass
+        else:
+            raise AssertionError(kind)
+
+
+def test_dance_stays_on_the_beat():
+    for bpm in (80, 100, 118, 130):
+        for sname, start in STARTS.items():
+            plan = M.plan_dance(start, bpm, 32)
+            check_plan(plan, start, True)
+            beat = 60.0 / bpm
+            s = plan.summary
+            assert s["beats"] == 32
+            t = s["intro_beats"] * beat
+            assert abs(plan.segs[0][1] - t) < 1e-6           # standing up fills the intro exactly
+            for t0, T, a, b, home in plan.segs[1:-1]:        # every dance move: whole (or half) beats
+                assert abs(T / beat * 2 - round(T / beat * 2)) < 1e-6, (bpm, T / beat)
+
+
+def wave_recording(start, seconds=3.0, amp=15.0, rate=30, fast=1.0):   # peak 63 deg/s
+    import random
+    rnd = random.Random(0)
+    frames = []
+    for k in range(int(seconds * rate)):
+        t = k / rate
+        pose = dict(start)
+        pose["shoulder_pan"] += amp * math.sin(2 * math.pi * fast * t / seconds * 2)
+        frames.append([t, [pose[j] + rnd.uniform(-0.4, 0.4) for j in M.JOINTS]])
+    return {"name": "wave", "frames": frames}
+
+
+def test_replay():
+    rec = wave_recording(STANDING)
+    for sname, start in STARTS.items():
+        traj = M.plan_replay(start, rec)
+        check_plan(traj, start, False)
+        assert not traj.summary["slowed_down"] and traj.summary["speed"] == 1.0
+        seq = [traj.at(k * DT) for k in range(int(traj.seconds / DT) + 2)]
+        for a, b in zip(seq, seq[1:]):
+            for j in M.JOINTS:
+                assert abs(b[j] - a[j]) / DT <= M.LIVELY[j] * 1.01, (sname, j)
+        assert abs(traj.at(traj.seconds)["shoulder_pan"] - traj.end["shoulder_pan"]) < 1e-9
+    slow = M.plan_replay(REST, rec, speed=0.5)
+    assert abs(slow.summary["speed"] - 0.5) < 1e-9 and slow.seconds > M.plan_replay(REST, rec).seconds
+    fast = M.plan_replay(REST, wave_recording(STANDING, amp=40, fast=6.0))   # ~500 deg/s: slowed down
+    assert fast.summary["slowed_down"] and fast.summary["speed"] < 1.0
+    json.dumps(fast.summary)            # the HTTP answer: numpy bools broke /replay (500) on 2026-10-28
+    low = {"name": "touch", "frames": [[k / 30, [REACH[j] for j in M.JOINTS]] for k in range(30)]}
+    M.plan_replay(REST, low)            # as low as it was taught: fine
+    lower = dict(REACH, shoulder_lift=REACH["shoulder_lift"] + 10)   # tip 2.0 -> -1.1 cm
+    try:                                # lower than it was taught (a modified file): refused
+        traj = M.plan_replay(REST, low)
+        traj.frames[10] = lower
+        assert traj.lowest() is not None
+    except M.Refused:
+        pass
+
+
+def test_follow_and_track():
+    f = M.Follow(REST)
+    target = dict(REST, shoulder_pan=REST["shoulder_pan"] + 90, gripper=200)
+    for _ in range(300):
+        cmd = f.step(target, DT)
+    assert cmd["gripper"] == 100.0 and cmd["shoulder_pan"] == M.TAUGHT_LIMITS["shoulder_pan"][1]
+    f = M.Follow(REST)
+    a = f.step(target, DT)
+    assert abs(a["shoulder_pan"] - REST["shoulder_pan"]) <= M.LIVELY["shoulder_pan"] * DT + 1e-9
+    up = M.plan_pose("portrait", REST).end
+    p = M.track_step(up, 0.5, 0.0, DT)
+    assert p["shoulder_pan"] > up["shoulder_pan"]               # face on the right: turn right
+    p = M.track_step(up, 0.0, 0.5, DT)
+    assert p["wrist_flex"] > up["wrist_flex"]                   # face low: tilt down
+    p = M.track_step(up, 0.05, -0.05, DT)
+    assert p == M.clamp(dict(up)) or all(abs(p[j] - up[j]) < 1e-9 for j in M.JOINTS)   # deadband
 
 
 if __name__ == "__main__":
