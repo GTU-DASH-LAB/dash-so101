@@ -132,8 +132,9 @@ class Voice:
                 p.unlink()
 
     @torch.inference_mode()
-    def synth(self, text, lang, voice_id="yaren"):
-        """float32 mono audio at self.sr, or None when there is nothing to say."""
+    def synth(self, text, lang, voice_id="yaren", style=None):
+        """float32 mono audio at self.sr, or None when there is nothing to say. style "angry": Chatterbox's
+        more expressive setting (exaggeration up, cfg_weight down, as its README suggests for drama)."""
         lang = lang if lang in ("tr", "en") else "en"
         t = speakable(text, lang)
         if not re.search(r"\w", t):
@@ -141,7 +142,8 @@ class Voice:
         v = self.voices.get(voice_id) or self.voices["yaren"]
         with self.lock:
             self.tts.conds = v["conds"]
-            wav = self.tts.generate(t, language_id=lang, cfg_weight=0.5, exaggeration=0.5, temperature=0.8)
+            ex, cfg = (0.8, 0.35) if style == "angry" else (0.5, 0.5)
+            wav = self.tts.generate(t, language_id=lang, cfg_weight=cfg, exaggeration=ex, temperature=0.8)
         audio = trim_tail(wav.squeeze(0).float().cpu().numpy(), self.sr, len(t))
         peak = float(np.abs(audio).max()) if audio.size else 0.0
         if peak > 0.99:

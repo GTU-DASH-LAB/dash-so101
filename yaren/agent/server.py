@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import secrets
 import signal
 import tempfile
@@ -26,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .body import Body
-from .brain import PERSONA, TOOLS, Session
+from .brain import PERSONA, TOOLS, Session, _num
 from .ears import Ears
 from .llm import LLM
 from .memory import STORES, Memory
@@ -81,12 +82,17 @@ class Hub:
         self.llm_ready = False
         self.sessions = set()
         self.saved = {}            # browser tab id -> Session.snapshot() of a closed connection
+        self.photos_dir = RUN / "photos"
+        self.timers = {}           # id -> {id, owner, text, due, task}; owner = the browser tab's id
+        self.missed = []           # timers that fired while nobody was connected: told to the next one
+        self.was_warm = False
 
     async def poll_robot(self):
         while True:
             try:
                 self.robot_status, self.robot_error = await self.body.status(), None
                 self.log_runs(self.robot_status)
+                self.note_health(self.robot_status)
             except Exception as e:  # noqa: BLE001
                 self.robot_status, self.robot_error = None, f"{type(e).__name__}: {e}"
             msg = {"type": "robot", "status": self.robot_status, "error": self.robot_error, "llm": self.llm_ready}
@@ -101,6 +107,80 @@ class Hub:
             if (r.get("at") or 0) > self.logged_at:
                 self.memory.log_run(r, dry=status.get("dry"))
                 self.logged_at = r["at"]
+
+    def note_health(self, status):
+        """A motor getting warm: every conversation hears it once (hot ones already refuse new work)."""
+        h = status.get("health") or {}
+        warm = bool(h.get("warm"))
+        if warm and not self.was_warm:
+            for s in list(self.sessions):
+                s.body_note(f"Your {h['hottest']} motor is getting warm: {h['max_temp_c']} C (it cuts out at "
+                            f"{h['limit_c']} C). If you are asked for a lot more work, suggest a short rest.")
+        self.was_warm = warm
+
+    # ---- timers: they belong to the browser tab that set them and survive its reconnects
+    @staticmethod
+    def _owner(session):
+        return session.cid or f"conn{id(session)}"
+
+    def timer_list(self, session):
+        me, now = self._owner(session), time.time()
+        return sorted(({"id": t["id"], "text": t["text"], "in_s": max(0, round(t["due"] - now)),
+                        "at": time.strftime("%H:%M:%S", time.localtime(t["due"]))}
+                       for t in self.timers.values() if t["owner"] == me), key=lambda t: t["in_s"])
+
+    def timer(self, session, args):
+        action = str(args.get("action") or "set").strip().lower()
+        me = self._owner(session)
+        if action == "list":
+            return {"timers": self.timer_list(session)}
+        if action == "cancel":
+            mine = [t for t in self.timers.values() if t["owner"] == me]
+            tid = str(args.get("id") or "").strip()
+            t = next((t for t in mine if t["id"] == tid), None) if tid else (mine[0] if len(mine) == 1 else None)
+            if t is None:
+                return {"error": "which timer? give its id" if mine and not tid else "no such timer",
+                        "timers": self.timer_list(session)}
+            t["task"].cancel()
+            del self.timers[t["id"]]
+            return {"cancelled": t["id"], "text": t["text"]}
+        secs = (_num(args.get("minutes")) or 0) * 60 + (_num(args.get("seconds")) or 0)
+        if secs <= 0:
+            return {"error": "how long? give minutes and/or seconds"}
+        if secs > 24 * 3600:
+            return {"error": "at most 24 hours"}
+        if sum(t["owner"] == me for t in self.timers.values()) >= 10:
+            return {"error": "already 10 timers; cancel one first"}
+        tid = secrets.token_hex(2)
+        while tid in self.timers:
+            tid = secrets.token_hex(2)
+        text = str(args.get("text") or "").strip()[:200] or "time is up"
+        due = time.time() + secs
+        self.timers[tid] = {"id": tid, "owner": me, "text": text, "due": due,
+                            "task": asyncio.create_task(self._fire_timer(tid, secs))}
+        log.info("timer %s in %.0f s: %s", tid, secs, text)
+        return {"set": True, "id": tid, "in_s": round(secs),
+                "rings_at": time.strftime("%H:%M:%S", time.localtime(due)), "text": text}
+
+    async def _fire_timer(self, tid, secs):
+        await asyncio.sleep(secs)
+        t = self.timers.pop(tid, None)
+        if t is None:
+            return
+        # its own tab, else whoever is connected now (the arm is shared), else the next one to connect
+        s = next((s for s in self.sessions if self._owner(s) == t["owner"]), None) \
+            or next(iter(sorted(self.sessions, key=lambda s: -s.started)), None)
+        log.info("timer %s fired (%s): %s", tid, "told" if s else "nobody connected", t["text"])
+        if s:
+            await s.timer_fired(t["text"])
+        else:
+            self.missed.append(t)
+
+    def deliver_missed(self, session):
+        now = time.time()
+        for t in [t for t in self.missed if now - t["due"] < 3600]:
+            asyncio.create_task(session.timer_fired(t["text"], missed_at=t["due"]))
+        self.missed = []
 
     def memory_view(self):
         dry = bool((self.robot_status or {}).get("dry"))
@@ -183,6 +263,14 @@ def make_app(hub, token):
             raise HTTPException(404, res["error"])
         return hub.memory_view()
 
+    @app.get("/api/photos/{name}")
+    def photo(name: str, request: Request):
+        check(req_token(request))
+        f = hub.photos_dir / name
+        if not re.fullmatch(r"\d{8}-\d{6}(-\d+)?\.jpg", name) or not f.is_file():
+            raise HTTPException(404, "no such photo")
+        return FileResponse(f, media_type="image/jpeg")
+
     @app.get("/api/camera/{name}.jpg")
     async def camera_jpg(name: str, request: Request):
         check(req_token(request))
@@ -229,7 +317,9 @@ def make_app(hub, token):
 
         wtask = asyncio.create_task(writer())
         session.send(type="hello", health=hub.health(), settings=session.settings,
-                     resumed=session.resumed, transcript=session.transcript() if session.resumed else [])
+                     resumed=session.resumed, transcript=session.transcript() if session.resumed else [],
+                     timers=hub.timer_list(session))
+        hub.deliver_missed(session)
         try:
             while True:
                 msg = await websocket.receive()
@@ -244,8 +334,14 @@ def make_app(hub, token):
                     session.send(type="user", text=ev["text"].strip(), lang=None, typed=True)
                     await session.on_user_text(ev["text"].strip())
                 elif t == "settings":
-                    session.settings.update({k: v for k, v in ev.items() if k in session.settings})
-                    session.send(type="settings", settings=session.settings)
+                    session.update_settings(ev)
+                elif t == "music_started":
+                    session.music_started.set()
+                elif t == "timer_cancel":
+                    hub.timer(session, {"action": "cancel", "id": str(ev.get("id") or "")})
+                    session.send(type="timers", timers=hub.timer_list(session))
+                elif t == "replay" and ev.get("name"):
+                    await session.replay_button(str(ev["name"]))
                 elif t == "ptt":
                     await session.on_ptt(bool(ev.get("down")))
                 elif t == "stop":

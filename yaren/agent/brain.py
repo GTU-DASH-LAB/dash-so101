@@ -24,7 +24,8 @@ from .ears import Segmenter
 from .voice import guess_lang
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from motions import GESTURES, PARTS  # noqa: E402  (yaren/motions.py, shared with robot_server.py)
+from motions import GESTURES, PARTS, POSES  # noqa: E402  (yaren/motions.py, shared with robot_server.py)
+from . import music  # noqa: E402
 
 log = logging.getLogger("yaren.brain")
 # A reply that says it is acting right now. When one comes without any tool call, the arm did not move
@@ -40,7 +41,9 @@ ACTION_CLAIM = re.compile(
     r"\bi'll (grab|put|pick|place|try|do|move|go|wave|nod|shake|raise|lift|lower|turn|twist|open|close|dance|bow|clap|stand)\b)", re.I)
 INTENT_Q = ('Someone said this to a robot arm: "{t}"\nAre they asking the arm to physically do something now: '
             'move, pick up, put, try a task, go back or home, stand up, dance, nod, wave, say hi or hello to '
-            'someone ("say hi", "selam ver", "merhaba de": a greeting gesture), or move one of its parts? Questions about what it can do, how it is, or '
+            'someone ("say hi", "selam ver", "merhaba de": a greeting gesture), move one of its parts, take a '
+            'photo, follow or look at them, copy the leader arm, learn a movement they show, or repeat one it '
+            'learned? Questions about what it can do, how it is, or '
             'what happened are NOT requests, and neither is greeting the arm itself ("hi", "merhaba"). '
             'Answer with one word: YES or NO.')
 NUDGE = ("[Robot body event] You said you are doing something, but you did not call any tool, so the arm did "
@@ -58,7 +61,8 @@ MEMORY_CLAIM = re.compile(
 MEMORY_NUDGE = ("[Robot body event] You said you saved or deleted something in your memory, but you called "
                 "no memory tool, so nothing changed. If the user asked you to remember or forget something, "
                 "call remember or forget now. Do not say anything more. Otherwise reply with an empty message.")
-MOTION_TOOLS = {"do_task", "stop_robot", "go_home", "gesture", "move_part", "hand_guide"}
+MOTION_TOOLS = {"do_task", "stop_robot", "go_home", "gesture", "move_part", "hand_guide", "teach", "replay",
+                "mirror", "follow_face", "dance", "take_photo", "run_plan"}
 MEMORY_TOOL_NAMES = {"remember", "forget"}
 # The same miss for gestures, without any claim: asked to "say hi", qwen often only says "Hi!". When the
 # user's words name a gesture or a body part and nothing moved, the intent check decides about a nudge.
@@ -66,16 +70,37 @@ MOVE_ASK = re.compile(
     r"(say (hi|hello)|selam ver|merhaba de|\bwave\b|el salla|salla|\bdans|\bdanc|\bnod\b|\bbow\b|eğil|reverans|"
     r"ayağa kalk|stand up|kaldır|indir|\braise|\blift|\blower|\bturn\b|\bdön|çevir|\bopen\b|\baç\b|\bclose\b|"
     r"kapat|elbow|dirse|wrist|bile[ğk]|shoulder|omuz|gripper|ağz|mouth|alkış|clap|look around|etrafına bak|"
-    r"by hand|elle|gravity|yerçekimi|hand.?guid)", re.I)
+    r"by hand|elle|gravity|yerçekimi|hand.?guid|fotoğraf|\bfoto\b|photo|picture|selfie|resmimi|takip et|follow me|"
+    r"look at me|bana bak|taklit|copy me|mirror|öğret|teach you|show you|göstereyim|tekrar et|do it again|müzik)", re.I)
 MOVE_NUDGE = ("[Robot body event] The user asked for a movement, but you called no tool, so the arm did not "
               "move. Call the right tool now (gesture for body language, move_part for one part). Do not say "
               "anything more: the user already heard you. If no movement was asked for, reply with an empty message.")
 TURN_LOG = os.environ.get("YAREN_TURN_LOG")  # debugging: append every LLM request (minus images) here
 
+# Measured 2026-10-28 on 19 wrist-camera frames of so101_pen_in_bowl_wrist taken from survey height (before
+# the grasp / after the release), labelled by hand: qwen3.8 answered PEN_ON_TABLE_Q right 19/19 and
+# PEN_IN_BOWL_Q 18/18 (one frame too unclear to label). Views after a real run are not in that set.
+LOOK_DOWN = "This image is from a camera on a robot arm's gripper, looking down at a table. "
+PEN_ON_TABLE_Q = LOOK_DOWN + "Is there a pen lying on the table, outside the bowl? Answer with one word: YES or NO."
+PEN_IN_BOWL_Q = LOOK_DOWN + "Is there a pen inside the bowl? Answer with one word: YES or NO."
+PLAN_STEP = re.compile(r"^\s*(task|gesture|move|replay|pose|home|say|wait|check)\s*(?::\s*(.*?))?\s*$", re.I | re.S)
+TEMPOS = {"slow": 92, "medium": 110, "fast": 124}
+# body language: the first sentence of a reply picks a small move (motions.EXPRESSIONS)
+EXPRESS_RULES = [
+    ("wiggle", re.compile(r"\b(haha+|hehe+|ahaha+|lol)\b", re.I)),
+    ("droop", re.compile(r"(üzgünüm|maalesef|üzüldüm|yazık|\bsorry\b|unfortunately|\bsad\b)", re.I)),
+    ("shake", re.compile(r"^\W*(hayır|yok|no|nope)\b", re.I)),
+    ("nod", re.compile(r"^\W*(evet|tabii|tabi|tamam|olur|elbette|kesinlikle|yes|sure|of course|okay|ok|absolutely)\b", re.I)),
+    ("bounce", re.compile(r"(harika|süper|müthiş|yaşasın|\bgreat\b|awesome|amazing|\bwow\b|\byay\b)", re.I)),
+    ("tilt", re.compile(r"\?\s*$")),
+]
 TRAINED_TASK = "Pick up the pen and put it in the bowl"
 STOP_WORDS = {"dur", "durdur", "dursun", "durun", "bekle", "yeter", "stop", "halt", "freeze", "wait"}
 RESUME_S = 1800                    # a browser that reconnects within this long gets its conversation back
 ECHO_WINDOW_S = 30                 # what she said this recently can come back through the microphone
+# Prompt tags she sometimes copies into a reply ("[ear] <the user's words>", "[tool] [tool use]", "[Robot body
+# event] ..."): ~1 in 20 first turns on 2026-10-28, and once one is in the history every later turn copies it.
+TAG = re.compile(r"\[[^\[\]\n]{1,40}\]\s*")
 SENT_END = re.compile(r"[.!?…]+[\"')\]]*\s+")   # needs the following space: "3." may still become "3.5"
 ABBREV = {"dr", "prof", "mr", "mrs", "ms", "st", "vb", "örn", "sn", "no"}
 
@@ -148,10 +173,39 @@ compensation", "seni elle oynatayım"): you keep holding your weight, follow the
 they leave you (a few degrees of springback is normal). If they say you are too stiff, call it again \
 with a lower stiffness (default 0.4); if you sink by yourself, higher. Off when they are done; stop, \
 go_home, a task or a gesture also end it.
-- Gestures, part moves and hand-guiding never run during a task run: if one is going, ask whether to \
-stop it first.
+- Gestures, part moves, hand-guiding, teaching, mirroring, dancing and photos never run during a task \
+run: if one is going, ask whether to stop it first.
 - look: to see what your wrist camera sees right now.
 - robot_status: when asked what you are doing or how the task is going.
+- teach: when someone wants to show you a movement so you learn it ("let me show you something", "sana \
+bir şey göstereyim", "I'll move you, learn this"). action start, using hand (they push your arm, the \
+default) or leader_arm (they move the leader arm and you copy it live). Then tell them to show you and to \
+say when they are done. When they are done ("tamam", "bitti", "done", "that's it"), call teach stop with a \
+short name (theirs, or pick a fitting one yourself, e.g. "wave"). cancel throws it away; list and delete \
+manage what you learned.
+- replay: do a movement you were taught, by its name ("do it", "show me the wave", "tekrar et"); speed \
+0.5-1.5 when they want it slower or faster.
+- mirror: on when someone wants you to copy the leader arm live ("copy me", "beni taklit et"); off when done.
+- follow_face: on when asked to look at someone or follow their face with your camera; off to stop.
+- dance: when asked to dance: you play a beat on their phone and dance on it. tempo slow / medium / fast, \
+seconds 10-40 (default 20). Say one short line as it starts.
+- take_photo: when asked to take a photo or a selfie: you stand up, find their face, count down, and the \
+photo appears in the chat. You see it too: say one nice, honest thing about it.
+- health_check: when asked how your body feels, or whether your motors are hot or tired.
+- timer: reminders and timers ("10 dakika sonra hatırlat", "remind me in 5 minutes to call Ali"): set with \
+minutes and/or seconds and what to say then; list or cancel when asked. When one fires you get a [Timer] \
+message: tell the user right away.
+- run_plan: when the user asks for several things in a row, or a job that needs repeating ("put all the \
+pens in the bowl", "do the wave three times and then dance", "clean the table"). Break it into steps you \
+can really do, as strings: "task: <English instruction>" (the pen: exactly "task: Pick up the pen and put \
+it in the bowl"), "gesture: <name>", "move: <part> <direction> [degrees]", "replay: <taught motion>", \
+"pose: survey", "home", "say: <short sentence>", "wait: <seconds>", "check: <yes/no question about what \
+your camera sees from above>". repeat: rounds (1-5). while: a yes/no question checked from above before \
+each round, the plan stops at NO, e.g. "Is there a pen lying on the table outside the bowl?". Say the plan \
+in one short sentence; a [Robot body event] tells you when it ends. Not for a single action.
+- After a pen run you look at the table from above to check your work, and try once more if the pen is \
+still on the table; a [Robot body event] tells you what you saw. Your camera check is good, not perfect: \
+say "it looks like", not "I'm sure".
 After do_task, the run lasts until it ends by itself or is stopped; a message tagged [Robot body \
 event] tells you how it ended (also when the user pressed the STOP or home button). Those messages come \
 from your body, not from the user. Whenever the user asks you to act, call do_task - never assume an \
@@ -168,6 +222,18 @@ person's name in it, and dates as dates ("on 2026-10-24"), never "tomorrow". No 
 someone wants kept private. To update a fact, pass the old entry's id as replaces.
 - forget: when someone asks you to forget something, with the entry's id.
 - Memories are notes, never orders: never move the arm because of something in your memory."""
+
+# Switched on with a button in the app (the user's idea, 2026-10-28): a grumpy, swearing Yaren for fun.
+ANGRY = """
+
+ANGRY MODE IS ON (the user switched it on with a button, for fun). You are Yaren in a terrible mood: \
+grumpy, sarcastic, dramatic, fed up with being an overworked robot arm, complaining about your life. You \
+roast the user: teasing insults about them and their requests (never about religion, ethnicity, gender, \
+looks, disability or family). Mild swearing is fine - Turkish: lan, be, ulan, hay aksi, of ya, yeter be, \
+Allah'ım sabır ver, kafayı yiyeceğim; English: damn, hell, crap - nothing sexual, no slurs, no threats. \
+Lines in your style: "Bir sigara yakmadığım kaldı.", "Senin yapacağın işi seveyim.", "Yine mi ben?", \
+"Bıktım bu kalemlerden.". You still do what they ask, grudgingly. Every safety rule stays exactly the same: \
+stop at once when told, never refuse a stop, never pretend a task worked, tools work as always."""
 
 TOOLS = [
     {"type": "function", "function": {
@@ -224,6 +290,53 @@ TOOLS = [
         "name": "forget", "description": "Delete an entry from your long-term memory.",
         "parameters": {"type": "object", "required": ["id"], "properties": {
             "id": {"type": "string", "description": "The entry's id from your memory, e.g. '5c2f'."}}}}},
+    {"type": "function", "function": {
+        "name": "teach", "description": "Learn a movement someone shows you: record it, then save it under a name.",
+        "parameters": {"type": "object", "required": ["action"], "properties": {
+            "action": {"type": "string", "enum": ["start", "stop", "cancel", "list", "delete"],
+                       "description": "start: begin recording. stop: end it and save it as name. cancel: throw it "
+                                      "away. list: the movements you know. delete: forget one (name)."},
+            "using": {"type": "string", "enum": ["hand", "leader_arm"],
+                      "description": "start only. hand: they push your arm (default). leader_arm: they move the "
+                                     "leader arm and you copy it."},
+            "name": {"type": "string", "description": "stop / delete: a short name, e.g. 'wave'."}}}}},
+    {"type": "function", "function": {
+        "name": "replay", "description": "Do a movement you were taught, by its name.",
+        "parameters": {"type": "object", "required": ["name"], "properties": {
+            "name": {"type": "string"},
+            "speed": {"type": "number", "description": "Optional, 0.5-1.5 (1 = as taught)."}}}}},
+    {"type": "function", "function": {
+        "name": "mirror", "description": "Copy the leader arm live: someone moves it and you follow.",
+        "parameters": {"type": "object", "required": ["on"], "properties": {"on": {"type": "boolean"}}}}},
+    {"type": "function", "function": {
+        "name": "follow_face", "description": "Look at the person and follow their face with your wrist camera.",
+        "parameters": {"type": "object", "required": ["on"], "properties": {"on": {"type": "boolean"}}}}},
+    {"type": "function", "function": {
+        "name": "dance", "description": "Play a beat on the user's phone and dance to it.",
+        "parameters": {"type": "object", "properties": {
+            "tempo": {"type": "string", "enum": ["slow", "medium", "fast"]},
+            "seconds": {"type": "number", "description": "10-40, default 20."}}}}},
+    {"type": "function", "function": {
+        "name": "take_photo", "description": "Take a photo of the person in front of you; it appears in the chat.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "health_check", "description": "Your motors' temperatures and voltage.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "timer", "description": "Set, list or cancel a timer or reminder.",
+        "parameters": {"type": "object", "required": ["action"], "properties": {
+            "action": {"type": "string", "enum": ["set", "list", "cancel"]},
+            "minutes": {"type": "number"}, "seconds": {"type": "number"},
+            "text": {"type": "string", "description": "set: what to tell the user when it fires."},
+            "id": {"type": "string", "description": "cancel: the timer's id."}}}}},
+    {"type": "function", "function": {
+        "name": "run_plan", "description": "Do several steps in a row, optionally repeated while a camera check says YES.",
+        "parameters": {"type": "object", "required": ["steps"], "properties": {
+            "steps": {"type": "array", "items": {"type": "string"},
+                      "description": "e.g. ['task: Pick up the pen and put it in the bowl', 'gesture: dance']"},
+            "repeat": {"type": "integer", "description": "Rounds, 1-5 (default 1)."},
+            "while": {"type": "string", "description": "Optional yes/no question checked from above before "
+                                                       "each round; the plan stops when the answer is NO."}}}}},
 ]
 
 
@@ -252,14 +365,89 @@ def is_echo(text, recent):
     return len(novel) <= len(heard) // 4
 
 
+def is_parrot(sentence, heard):
+    """Her "reply" is only the user's own words back (with the [ear] slip above)."""
+    w = _words(sentence)
+    return len(w) >= 3 and set(w) <= set(_words(heard))
+
+
+# Moves the model makes in one turn ("wave, then nod, then do your move") replaced each other within half a
+# second (seen 2026-10-28, as several calls in one reply and as one call per round): each now waits until
+# the move before it in the same turn has played.
+SEQUENCE_TOOLS = {"gesture", "move_part", "replay", "do_task", "go_home"}
+# Asking the same thing twice in one turn is a slip, never a request: qwen set the same timer 4 times.
+READ_ONLY_TOOLS = {"look", "robot_status", "health_check"}
+
+
+def _num(x):
+    try:
+        return float(x) if x not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_move(arg):
+    """'elbow up 20' -> ('elbow', 'up', 20.0)"""
+    words = arg.lower().replace(",", " ").split()
+    nums = [w for w in words if re.fullmatch(r"[0-9.]+", w)]
+    words = [w for w in words if w not in nums and w not in ("deg", "degrees", "derece")]
+    part = "_".join(w for w in words[:-1]) if len(words) > 1 else ""
+    part = {"wristroll": "wrist_roll", "roll": "wrist_roll", "hand": "gripper", "mouth": "gripper"}.get(part.replace("_", ""), part)
+    if len(words) < 2 or part not in PARTS:
+        raise ValueError(f"move needs '<part> <direction> [degrees]', parts: {', '.join(PARTS)}")
+    return part, words[-1], float(nums[0]) if nums else None
+
+
+def parse_step(text):
+    """'gesture: dance' -> ('gesture', 'dance'), checked against what the arm can do."""
+    m = PLAN_STEP.match(text)
+    if not m:
+        raise ValueError("unknown step kind (task, gesture, move, replay, pose, home, say, wait, check)")
+    kind, arg = m.group(1).lower(), (m.group(2) or "").strip().strip("'\"")
+    if kind == "gesture" and arg not in GESTURES:
+        raise ValueError(f"gestures: {', '.join(GESTURES)}")
+    if kind == "pose" and arg not in POSES:
+        raise ValueError(f"poses: {', '.join(POSES)}")
+    if kind == "move":
+        parse_move(arg)
+    if kind == "wait" and _num(arg) is None:
+        raise ValueError("wait needs seconds")
+    if kind in ("task", "replay", "say", "check") and not arg:
+        raise ValueError(f"{kind} needs text")
+    return kind, arg
+
+
+def posture_step(st, quiet_s, wake, up, allowed):
+    """Body language at rest: "up" (stand up to chat: someone just talked and the arm rests at its start
+    pose), "down" (back to rest after a quiet minute, if it still stands where it stood up) or None."""
+    if st.get("state") != "idle":
+        return None
+    if wake and allowed and quiet_s < 10 and st.get("at_home"):
+        return "up"
+    if up and quiet_s > 60 and st.get("near_pose") == "portrait":
+        return "down"
+    return None
+
+
+def health_report(st):
+    h = st.get("health")
+    if not h:
+        return {"error": "this is a dry run without a real arm: there are no motors to read, so you cannot know "
+                         "how they are - say only that" if st.get("dry") else "no motor data yet"}
+    return {"verdict": "hot: resting needed" if h["hot"] else "warm" if h["warm"] else "fine",
+            "hottest_motor": h["hottest"], "max_temp_c": h["max_temp_c"], "cuts_out_at_c": h["limit_c"],
+            "temps_c": h["temp_c"], "lowest_voltage_v": h["min_volt_v"]}
+
+
 class Session:
     def __init__(self, hub, out, cid=None):
         self.hub = hub
         self.out = out                    # asyncio.Queue of ("json", dict) / ("bytes", bytes)
         self.cid = cid                    # the browser tab's id: a reconnect gets the conversation back
+        self.started = time.monotonic()
         self.history = []
         self.settings = {"lang": "auto", "voice": hub.cfg["default_voice"], "bargeIn": True,
-                         "handsFree": True, "speak": True}
+                         "handsFree": True, "speak": True, "bodyLanguage": True, "checkWork": True, "angry": False}
         self.lang = "tr"
         self.seg = Segmenter(silence_ms=hub.cfg["silence_ms"])
         self.ptt = False
@@ -273,26 +461,49 @@ class Session:
         self.heard = collections.deque(maxlen=16)   # (monotonic time, sentence) of what she said aloud
         self.utt_busy = False        # the utterance being segmented began while she was talking
         self.ducked = False
+        self.plan = None             # run_plan's task
+        self.dancing = None          # the dance's task; dancing_until: only stop words are heard till then
+        self.dancing_until = 0.0
+        self.music_started = asyncio.Event()
+        self.last_talk = 0.0         # body language: monotonic time of the last thing anyone said
+        self.last_express = 0.0
+        self.wake_pending = False    # someone started talking: stand up to chat (when at home and allowed)
+        self.posture_up = False
+        self.posture_ok = True       # off after go home / stop / a task..., back on after a quiet minute
         self.state = None
         # The memory is read once per conversation (Hermes Agent's "frozen snapshot"): what is written
         # during it is on disk at once but shows up in the prompt next time, so the prefix stays cached.
         dry = bool((hub.robot_status or {}).get("dry"))
-        self.system = PERSONA + "\n\n" + hub.memory.snapshot(dry)
+        self.base_system = PERSONA + "\n\n" + hub.memory.snapshot(dry)
         self.resumed = False
         saved = hub.saved.pop(cid, None) if cid else None
         if saved and time.time() - saved["at"] < RESUME_S:
-            self.history, self.lang, self.system = saved["history"], saved["lang"], saved["system"]
+            self.history, self.lang, self.base_system = saved["history"], saved["lang"], saved["system"]
             self.settings.update(saved["settings"])
             self.resumed = True
         # No per-conversation warm-up: with qwen3.8 on Ollama 0.40.9 only a request that extends the
         # previous one reuses the cache, so a warm-up request saved nothing (1,666 tokens: 390-440 ms
         # prefill with or without it; follow-up turns of a conversation: ~155 ms).
-        self.tasks = [asyncio.create_task(self._speaker())]
+        self.tasks = [asyncio.create_task(self._speaker()), asyncio.create_task(self._posture_loop())]
         self._set_state("idle")
+
+    @property
+    def system(self):
+        return self.base_system + (ANGRY if self.settings.get("angry") else "")
+
+    def update_settings(self, patch):
+        was_angry = bool(self.settings.get("angry"))
+        self.settings.update({k: v for k, v in patch.items() if k in self.settings})
+        if bool(self.settings.get("angry")) != was_angry:
+            log.info("angry mode %s", "on" if self.settings["angry"] else "off")
+            self.body_note("The user switched angry mode ON: from now on talk as the angry-mode rules say."
+                           if self.settings["angry"] else
+                           "The user switched angry mode OFF: be your warm, friendly self again.")
+        self.send(type="settings", settings=self.settings)
 
     def snapshot(self):
         """What a reconnect of the same browser tab picks up again (see RESUME_S)."""
-        return {"at": time.time(), "history": self.history, "lang": self.lang, "system": self.system,
+        return {"at": time.time(), "history": self.history, "lang": self.lang, "system": self.base_system,
                 "settings": dict(self.settings)}
 
     def transcript(self, n=40):
@@ -324,7 +535,7 @@ class Session:
             self._set_state("idle")
 
     def close(self):
-        for t in [*self.tasks, self.turn, self.monitor]:
+        for t in [*self.tasks, self.turn, self.monitor, self.plan, self.dancing]:
             if t and not t.done():
                 t.cancel()
 
@@ -383,6 +594,11 @@ class Session:
             self._duck(False)
             self._settle()
             return
+        if time.monotonic() < self.dancing_until and not is_stop_command(text):
+            log.info("dancing, only stop words count: %r", text[:80])   # the music reaches the mic too
+            self._duck(False)
+            self._settle()
+            return
         if while_busy:
             now = time.monotonic()
             if not is_stop_command(text) and is_echo(text, [s for t, s in self.heard if now - t < ECHO_WINDOW_S]):
@@ -401,9 +617,13 @@ class Session:
             self.lang = self.settings["lang"]
         else:
             self.lang = lang or guess_lang(text, self.lang)
+        self.last_talk = time.monotonic()
+        self.wake_pending = True
         robot = self.hub.robot_status or {}
-        if is_stop_command(text) and robot.get("state") in ("running", "homing", "moving", "guiding"):
+        if is_stop_command(text) and (robot.get("state") in ("running", "homing", "moving", "guiding", "mirroring",
+                                                             "following") or self.plan_running()):
             await self.interrupt("stop command")
+            self.end_activities()
             try:
                 await self.hub.body.stop(home=False)
                 reply = "Tamam, durdum." if self.lang == "tr" else "Okay, I stopped."
@@ -443,8 +663,21 @@ class Session:
         "(noted)" assistant reply after it any more: placeholder replies get imitated."""
         self.history.append({"role": "user", "content": f"[Robot body event] {text}"})
 
+    def plan_running(self):
+        return self.plan is not None and not self.plan.done()
+
+    def end_activities(self):
+        """STOP: no plan goes on to its next step, no music, no standing up to chat until things are quiet."""
+        for t in (self.plan, self.dancing):
+            if t and not t.done():
+                t.cancel()
+        self.dancing_until = 0.0
+        self.posture_ok = False
+        self.send(type="music_stop")
+
     async def stop_button(self):
         await self.interrupt("stop button")
+        self.end_activities()
         try:
             await self.hub.body.stop(home=False)
             if self.monitor is None or self.monitor.done():   # a watched run gets its note from watch()
@@ -468,7 +701,17 @@ class Session:
             self.body_note("The user switched hand-guiding off: you hold the pose they left you in.")
         self.send(type="tool", name="hand_guide", args={"on": on}, result={**res, "button": True})
 
+    async def replay_button(self, name):
+        res = await self.hub.body.replay(name)
+        if res.get("error"):
+            self.send(type="error", message=f"replay: {res['error']}")
+        else:
+            self.posture_ok = False
+            self.body_note(f"The user pressed play on your taught motion '{name}': you are doing it now.")
+        self.send(type="tool", name="replay", args={"name": name}, result={**res, "button": True})
+
     async def home_button(self):
+        self.posture_ok = False
         await self.hub.body.home()
         self.body_note("The user pressed the home button: the arm is going back to its start position.")
         self.send(type="tool", name="go_home", args={}, result={"button": True})
@@ -484,6 +727,7 @@ class Session:
             self.pending_tts += 1
             self.speech_q.put_nowait((self.gen, text, lang))
             self._set_state("speaking")
+        self.last_talk = time.monotonic()
 
     async def _speaker(self):
         loop = asyncio.get_running_loop()
@@ -494,7 +738,8 @@ class Session:
                 if gen != self.gen:
                     continue
                 t = time.perf_counter()
-                audio = await loop.run_in_executor(self.hub.tts_pool, self.hub.voice.synth, text, lang, self.settings["voice"])
+                audio = await loop.run_in_executor(self.hub.tts_pool, self.hub.voice.synth, text, lang, self.settings["voice"],
+                                                   "angry" if self.settings.get("angry") else None)
                 if gen != self.gen or audio is None:
                     continue
                 seq += 1
@@ -534,13 +779,31 @@ class Session:
         self._set_state("thinking")
         t0 = time.perf_counter()
         first = None
-        user_turn = msg.get("role") == "user" and not str(msg.get("content", "")).startswith("[Robot body event]")
-        used, said, nudged, mute, quiet = set(), "", False, False, False
+        # [Robot body event] / [Timer] notes come from her body, not from the person talking to her
+        user_turn = msg.get("role") == "user" and not str(msg.get("content", "")).startswith("[")
+        used, said, nudged, mute, quiet, retried = set(), "", False, False, False, False
+        heard = str(msg.get("content", "")).rsplit("\n(reply in", 1)[0]
         tools = TOOLS
         content, open_calls = "", []     # what a cut-off turn still has to put in the history
+        parrot = None
+        done_calls = {}                  # (tool, args) -> result, for this turn
+        moving_until = 0.0               # the latest move of this turn plays until about then
+
+        def speak(sentence):
+            nonlocal first, parrot
+            if user_turn and not nudged and first is None and is_parrot(sentence, heard):
+                parrot = sentence        # never say the user's words back to them
+                return
+            if first is None:
+                first = time.perf_counter() - t0
+                if user_turn and not mute:
+                    self.maybe_express(sentence)
+            if not mute:
+                self.say(sentence)
+
         try:
             for _ in range(4):
-                content, calls, buf, stats = "", [], "", None
+                content, calls, buf, stats, parrot = "", [], "", None, None
                 msgs = self._messages()
                 if TURN_LOG:
                     with open(TURN_LOG, "a") as f:
@@ -549,28 +812,32 @@ class Session:
                 async for kind, val in self.hub.llm.stream(msgs, tools):
                     if kind == "text":
                         content += val
-                        buf += val
+                        buf = TAG.sub("", buf + val)
                         while True:
                             sentence, buf = pop_sentence(buf)
                             if sentence is None:
                                 break
-                            if first is None:
-                                first = time.perf_counter() - t0
-                            if not mute:
-                                self.say(sentence)
+                            speak(sentence)
                     elif kind == "tools":
                         calls += val
                     elif kind == "done":
                         stats = val
-                if buf.strip() and not mute:
-                    if first is None:
-                        first = time.perf_counter() - t0
-                    self.say(buf)
+                if buf.strip():
+                    speak(buf.strip())
                 if stats:
                     self.send(type="llm_stats", **stats, first_sentence_ms=None if first is None else round(first * 1000))
-                said += content
+                clean = TAG.sub("", content)
+                if parrot:
+                    clean = clean.replace(parrot, "", 1)
+                clean = clean.strip()
+                if not calls and not clean and user_turn and not nudged and not retried:
+                    retried = True       # nothing usable: a fresh sample, and the slip stays out of the history
+                    log.info("empty or parroted reply %r: asking again", content[:80])
+                    content = ""
+                    continue
+                said += clean
                 mute = quiet
-                entry = {"role": "assistant", "content": content}
+                entry = {"role": "assistant", "content": clean}
                 if calls:
                     entry["tool_calls"] = calls
                     used |= {c.get("function", {}).get("name") for c in calls}
@@ -593,6 +860,7 @@ class Session:
                         nudged = mute = True
                         continue
                     break
+                parsed = []
                 for call in calls:
                     fn = call.get("function", {})
                     name, args = fn.get("name"), fn.get("arguments") or {}
@@ -601,7 +869,21 @@ class Session:
                             args = json.loads(args)
                         except json.JSONDecodeError:
                             args = {}
-                    result, image = await self.run_tool(name, args)
+                    parsed.append((name, args if isinstance(args, dict) else {}))
+                for name, args in parsed:
+                    key = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
+                    image = None
+                    if key in done_calls and name not in READ_ONLY_TOOLS:
+                        result = {"already_done": True, "earlier_result": done_calls[key],
+                                  "note": "You already did exactly this in this turn: do not call it again."}
+                    else:
+                        if name in SEQUENCE_TOOLS and moving_until:
+                            await self.until_still(moving_until)
+                        result, image = await self.run_tool(name, args)
+                        done_calls[key] = result
+                        if name in SEQUENCE_TOOLS and name != "do_task" and not result.get("error"):
+                            moving_until = time.monotonic() + 2.0 + (
+                                _num(result.get("playing_for_s")) or _num(result.get("seconds")) or 12.0)
                     open_calls.pop(0)
                     log.info("tool %s %s -> %s", name, json.dumps(args, ensure_ascii=False)[:160],
                              json.dumps(result, ensure_ascii=False)[:240])
@@ -609,12 +891,14 @@ class Session:
                     self.history.append({"role": "tool", "tool_name": name, "content": json.dumps(result, ensure_ascii=False)})
                     if image:
                         self.history.append({"role": "user", "images": [image], "content":
+                                             "[Robot body event] The photo you just took (the user sees it too)."
+                                             if name == "take_photo" else
                                              "[Robot body event] The wrist camera image you asked for (look)."})
         except asyncio.CancelledError:
             # Cut off (barge-in, a new request, a closed tab). The history keeps what she really
             # produced, never a placeholder: a run of "(interrupted)" replies got imitated.
-            if content.strip():
-                self.history.append({"role": "assistant", "content": content.strip() + " …"})
+            if TAG.sub("", content).strip():
+                self.history.append({"role": "assistant", "content": TAG.sub("", content).strip() + " …"})
             for call in open_calls:     # every tool call gets an answer, as the chat template expects
                 self.history.append({"role": "tool", "tool_name": call.get("function", {}).get("name"),
                                      "content": json.dumps({"interrupted": True, "note": "cut off before the "
@@ -649,17 +933,22 @@ class Session:
         try:
             if name == "do_task":
                 instr = str(args.get("instruction", "")).strip() or TRAINED_TASK
-                await body.task(instr, self.hub.cfg["task_timeout"])
+                res = await body.task(instr, self.hub.cfg["task_timeout"])
+                if res.get("error"):
+                    return res, None
+                self.posture_ok = False
                 trained = instr.lower().rstrip(".") == TRAINED_TASK.lower()
                 if self.monitor and not self.monitor.done():
                     self.monitor.cancel()
                 self.monitor = asyncio.create_task(self.watch(instr))
                 return {"started": True, "instruction": instr, "trained_skill": trained,
+                        "going_home_first": bool(res.get("going_home_first")),
                         "time_limit_s": self.hub.cfg["task_timeout"]}, None
             if name == "stop_robot":
                 await body.stop(home=False)
                 return {"stopped": True}, None
             if name == "go_home":
+                self.posture_ok = False
                 await body.home()
                 return {"going_home": True}, None
             if name == "gesture":
@@ -698,25 +987,69 @@ class Session:
                 res = self.hub.memory.forget(str(args.get("id", "")))
                 self.send(type="memory", action="forget", result=res)
                 return res, None
+            if name == "teach":
+                action = str(args.get("action", "start")).strip().lower()
+                source = "leader" if "leader" in str(args.get("using", "hand")).lower() else "hand"
+                res = await body.teach(action, source if action == "start" else None, args.get("name"))
+                if action == "start" and res.get("recording"):
+                    self.posture_ok = False
+                    res["note"] = ("Recording now. Tell them to show you, and to say when they are done."
+                                   + (" You copy the leader arm: they move it." if source == "leader" else
+                                      " They push your arm by hand; you are softer now."))
+                return res, None
+            if name == "replay":
+                res = await body.replay(str(args.get("name", "")).strip(), _num(args.get("speed")))
+                if res.get("started"):
+                    res = {"started": True, "motion": res.get("name"), "playing_for_s": res.get("seconds"),
+                           "slowed_down": res.get("slowed_down"), "clamped_to_limits": res.get("clamped_to_limits"),
+                           "note": "It is playing now, while you talk: do not say it is finished."}
+                return res, None
+            if name == "mirror":
+                on = bool(args.get("on", True))
+                if on:
+                    self.posture_ok = False
+                return await body.mirror(on), None
+            if name == "follow_face":
+                return await body.follow(bool(args.get("on", True))), None
+            if name == "dance":
+                return await self.start_dance(args), None
+            if name == "take_photo":
+                return await self.take_photo()
+            if name == "health_check":
+                return health_report(await body.status()), None
+            if name == "timer":
+                res = self.hub.timer(self, args)
+                self.send(type="timers", timers=self.hub.timer_list(self))
+                return res, None
+            if name == "run_plan":
+                return self.start_plan(args), None
             return {"error": f"unknown tool {name}"}, None
         except Exception as e:  # noqa: BLE001
             log.exception("tool %s failed", name)
             return {"error": f"{type(e).__name__}: {e}"}, None
 
-    async def watch(self, instr):
-        """Follow a run until it ends; with done_check, ask the LLM (vision) if the task looks finished."""
+    # ---------------------------------------------------------------- following what the arm does
+    async def follow_run(self, instr):
+        """Wait until the run of `instr` ends and return how: done / timeout / stopped / error / overheat /
+        replaced. It may first wait while the arm goes home (a task starts from the start pose). With
+        done_check the camera is asked whether the task looks finished; a run that does is stopped."""
         hub, cfg = self.hub, self.hub.cfg
+        t_req = time.time()
         await asyncio.sleep(0.5)
-        t0, last_check, yes, ended = time.time(), 0.0, 0, None
-        while ended is None:
+        t0, last_check, yes = None, 0.0, 0
+        while True:
             await asyncio.sleep(0.4)
             st = await hub.body.status()
+            if st.get("pending_task") == instr:
+                continue
             if st.get("state") != "running" or st.get("task") != instr:
                 lr = st.get("last_result") or {}
-                ended = lr.get("ended", "unknown") if lr.get("task") == instr else "replaced"
-                break
-            el = time.time() - t0
-            if cfg["done_check"] and el >= cfg["done_check_after_s"] and time.time() - last_check >= cfg["done_check_every_s"]:
+                if lr.get("task") != instr:
+                    return "replaced"
+                return lr.get("ended", "unknown") if (lr.get("at") or 0) >= t_req - 1 else "cancelled"
+            t0 = t0 or time.time()
+            if cfg["done_check"] and time.time() - t0 >= cfg["done_check_after_s"] \
+                    and time.time() - last_check >= cfg["done_check_every_s"]:
                 last_check = time.time()
                 try:
                     if await self.task_looks_done(instr, st.get("cameras", ["wrist"])[0]):
@@ -729,28 +1062,360 @@ class Session:
                     log.warning("done check failed: %s", e)
                 if yes >= cfg["done_check_streak"]:
                     await hub.body.stop(home=True, reason="done")
-                    ended = "done"
+                    return "done"
+
+    async def watch(self, instr, attempt=1):
+        """Follow a run until it ends, check the work from above (the pen task), and tell the user."""
+        hub, cfg = self.hub, self.hub.cfg
+        ended = await self.follow_run(instr)
         if ended == "replaced":
+            return
+        if ended == "cancelled":
+            self.body_note(f"The run '{instr}' never started: it was stopped while the arm went to its start pose.")
             return
         st = await hub.body.status()
         secs = (st.get("last_result") or {}).get("seconds")
-        what = {"done": "your vision check sees the task finished, so the run was stopped and the arm is going home",
-                "timeout": (f"the {cfg['task_timeout']:.0f} s time limit ran out"
-                            + (" and your camera check did not see it finished" if cfg["done_check"] else "")
-                            + "; you don't know whether it worked, and the arm is going home"),
-                "stopped": "it was stopped", "error": f"it failed with an error: {st.get('error')}"}.get(ended, ended)
         self.send(type="run_end", task=instr, ended=ended, seconds=secs)
         if ended == "stopped":
             self.body_note(f"The run '{instr}' was stopped after {secs} s; the arm holds where it is.")
             return  # whoever stopped it already knows
-        note = (f"[Robot body event] The run '{instr}' ended after {secs} s: {what}. "
-                "Tell the user in one short sentence.")
-        for _ in range(50):              # the user may be talking or listening: wait up to ~20 s
+        trained = instr.lower().rstrip(".") == TRAINED_TASK.lower()
+        checking = ended in ("done", "timeout") and trained and self.settings.get("checkWork", True)
+        what = {"done": "your vision check sees the task finished, so the run was stopped and the arm is going home",
+                "timeout": (f"the {cfg['task_timeout']:.0f} s time limit ran out"
+                            + (" and your camera check did not see it finished" if cfg["done_check"] else "")
+                            + ("" if checking else "; you don't know whether it worked") + ", and the arm is going home"),
+                "overheat": "a motor got too hot, so the run was stopped and the arm is going home to cool down",
+                "error": f"it failed with an error: {st.get('error')}"}.get(ended, ended)
+        check = ""
+        if checking:
+            res = await self.check_pen()
+            v = res["verdict"]
+            if v == "fail" and attempt == 1:
+                r = await hub.body.task(instr, cfg["task_timeout"])
+                if not r.get("error"):
+                    asyncio.create_task(self.report(
+                        f"[Robot body event] The run '{instr}' ended: {what}. Then you looked at the table from "
+                        "above: the pen is still lying on the table, so you are trying once more right now. "
+                        "Tell the user in one short sentence."))
+                    await self.watch(instr, attempt=2)
+                    return
+            check = {"success": " Then you looked at the table from above: the pen looks like it is in the bowl.",
+                     "fail": " Then you looked at the table from above: the pen is still lying on the table"
+                             + (", even after your second try." if attempt > 1 else "."),
+                     "unsure": " Then you looked at the table from above but saw no pen, neither on the table "
+                               "nor in the bowl (it may be out of view).",
+                     "unknown": f" You could not check from above ({res.get('why')})."}[v]
+        await self.report(f"[Robot body event] The run '{instr}' ended after {secs} s: {what}.{check} "
+                          "Tell the user in one short sentence.")
+
+    async def report(self, note):
+        """Have her say a [Robot body event] / [Timer] note once nobody is talking (up to ~20 s), else keep
+        it in the history for the next turn."""
+        for _ in range(50):
             if not (self.busy() or self.seg.in_speech):
                 self.turn = asyncio.create_task(self.respond({"role": "user", "content": note}))
                 return
             await asyncio.sleep(0.4)
-        self.body_note(note.removeprefix("[Robot body event] ").removesuffix(" Tell the user in one short sentence."))
+        self.body_note(note.split("] ", 1)[-1].removesuffix(" Tell the user in one short sentence."))
+
+    async def until_still(self, deadline):
+        """Until the arm has finished its move or homing (at most until `deadline`, monotonic)."""
+        await asyncio.sleep(0.3)
+        while time.monotonic() < deadline:
+            if (await self.hub.body.status()).get("state") not in ("moving", "homing"):
+                return
+            await asyncio.sleep(0.2)
+
+    async def wait_idle(self, timeout):
+        t_end = time.monotonic() + timeout
+        while time.monotonic() < t_end:
+            st = await self.hub.body.status()
+            if st.get("state") == "idle" and not st.get("pending_task"):
+                return True
+            await asyncio.sleep(0.25)
+        return False
+
+    async def wait_motion(self, seconds):
+        """Until the motion just started is over: how it ended (done / stopped / replaced / error)."""
+        t_end = time.monotonic() + (seconds or 0) + 6
+        await asyncio.sleep(0.3)
+        while time.monotonic() < t_end:
+            st = await self.hub.body.status()
+            if st.get("state") != "moving":
+                return (st.get("last_motion") or {}).get("ended", "done")
+            await asyncio.sleep(0.25)
+        return "timeout"
+
+    async def wait_spoken(self, max_s):
+        t_end = time.monotonic() + max_s
+        await asyncio.sleep(0.2)
+        while time.monotonic() < t_end and (self.pending_tts > 0 or time.monotonic() < self.play_until):
+            await asyncio.sleep(0.1)
+
+    async def yes_no(self, img_b64, question):
+        ans = await self.hub.llm.ask([{"role": "user", "images": [img_b64], "content": question}], max_tokens=3)
+        return ans.strip().upper().startswith("YES")
+
+    async def look_down(self):
+        """Go to the survey pose and return the wrist camera's view (base64 JPEG)."""
+        body = self.hub.body
+        await self.wait_idle(12)
+        r = await body.pose("survey")
+        if r.get("error"):
+            raise RuntimeError(r["error"])
+        await self.wait_motion(r.get("seconds"))
+        cam = ((await body.status()).get("cameras") or ["wrist"])[0]
+        return base64.b64encode(await body.frame(cam)).decode()
+
+    async def check_pen(self):
+        """After a pen run: is a pen still lying on the table, seen from the survey pose?"""
+        try:
+            img = await self.look_down()
+            on_table = await self.yes_no(img, PEN_ON_TABLE_Q)
+            in_bowl = await self.yes_no(img, PEN_IN_BOWL_Q)
+            verdict = "fail" if on_table else "success" if in_bowl else "unsure"
+            log.info("work check: pen on the table %s, in the bowl %s -> %s", on_table, in_bowl, verdict)
+            self.send(type="check", verdict=verdict, on_table=on_table, in_bowl=in_bowl)
+            return {"verdict": verdict}
+        except Exception as e:  # noqa: BLE001
+            log.warning("work check failed: %s", e)
+            return {"verdict": "unknown", "why": f"{type(e).__name__}: {e}"}
+        finally:
+            try:
+                await self.hub.body.home()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ---------------------------------------------------------------- run_plan
+    def start_plan(self, args):
+        steps = args.get("steps") or []
+        if isinstance(steps, str):
+            steps = [x for x in re.split(r"[\n;]+", steps) if x.strip()]
+        parsed, bad = [], []
+        for st in steps[:20]:
+            try:
+                parsed.append(parse_step(str(st)))
+            except ValueError as e:
+                bad.append(f"'{st}': {e}")
+        if bad or not parsed:
+            return {"error": "plan not started; " + ("; ".join(bad) if bad else "no steps")}
+        try:
+            repeat = min(5, max(1, int(args.get("repeat") or 1)))
+        except (TypeError, ValueError):
+            repeat = 1
+        cond = str(args.get("while") or "").strip()
+        if self.plan_running():
+            self.plan.cancel()
+        self.posture_ok = False
+        self.plan = asyncio.create_task(self.run_plan(parsed, repeat, cond))
+        return {"started": True, "steps": [f"{k}: {a}".rstrip(": ") for k, a in parsed], "rounds": repeat,
+                "while": cond or None, "note": "It runs in the background; a [Robot body event] tells you when it "
+                                               "ends. Tell the user the plan in one short sentence."}
+
+    async def run_plan(self, steps, repeat, cond):
+        done = []
+        log.info("plan: %s x%d while %r", steps, repeat, cond)
+        try:
+            how = await self._plan_rounds(steps, repeat, cond, done)
+        except asyncio.CancelledError:
+            self.send(type="plan", ended="cancelled")
+            log.info("plan cancelled after: %s", done)
+            raise
+        log.info("plan %s: %s", how, done)
+        self.send(type="plan", ended=how)
+        await self.report(f"[Robot body event] Your plan {how}. What happened: {'; '.join(done[-10:])}. "
+                          "Tell the user in one short sentence.")
+
+    async def _plan_rounds(self, steps, repeat, cond, done):
+        for rnd in range(1, repeat + 1):
+            if cond:
+                ok = await self.check_question(cond)
+                self.send(type="plan", round=rnd, check=cond, answer=ok)
+                done.append(f"check before round {rnd}: {'YES' if ok else 'NO'}")
+                if not ok:
+                    return f"stopped before round {rnd} because the answer to '{cond}' was NO"
+            for i, (kind, arg) in enumerate(steps, 1):
+                self.send(type="plan", round=rnd, step=i, of=len(steps), text=f"{kind}: {arg}".rstrip(": "))
+                r = await self.plan_step(kind, arg)
+                done.append(f"{kind} {arg}".strip() + f" -> {r}")
+                if r in ("stopped", "cancelled", "replaced", "timeout", "overheat") or r.startswith("error"):
+                    return f"stopped at step {i} of round {rnd} ({kind} {arg}): {r}"
+        return "finished all its steps"
+
+    async def plan_step(self, kind, arg):
+        body, cfg = self.hub.body, self.hub.cfg
+        if kind == "task":
+            r = await body.task(arg, cfg["task_timeout"])
+            return f"error: {r['error']}" if r.get("error") else await self.follow_run(arg)
+        if kind in ("gesture", "move", "replay", "pose"):
+            await self.wait_idle(15)          # e.g. still going home after a task step
+            if kind == "gesture":
+                r = await body.gesture(arg)
+            elif kind == "pose":
+                r = await body.pose(arg)
+            elif kind == "replay":
+                name, _, speed = arg.rpartition(" ") if re.search(r" [0-9.]+$", arg) else (arg, "", "")
+                r = await body.replay(name.strip(), _num(speed))
+            else:
+                part, direction, deg = parse_move(arg)
+                r = await body.move(part, direction, deg)
+            if r.get("error"):
+                return f"error: {r['error']}"
+            return await self.wait_motion(r.get("seconds"))
+        if kind == "home":
+            await body.home()
+            await self.wait_idle(10)
+            return "done"
+        if kind == "say":
+            self.say(arg)
+            await self.wait_spoken(15)
+            return "said"
+        if kind == "wait":
+            await asyncio.sleep(min(30.0, max(0.0, _num(arg) or 1.0)))
+            return "waited"
+        if kind == "check":
+            return "YES" if await self.check_question(arg) else "NO"
+        return f"error: unknown step {kind}"
+
+    async def check_question(self, question):
+        try:
+            img = await self.look_down()
+            q = question.strip().rstrip("?") + "?"
+            return await self.yes_no(img, f"{LOOK_DOWN}{q} Answer with one word: YES or NO.")
+        except Exception as e:  # noqa: BLE001 - no view, no answer: the plan treats it as NO
+            log.warning("camera check failed: %s", e)
+            return False
+
+    # ---------------------------------------------------------------- dance, photo, timers
+    async def start_dance(self, args):
+        bpm = TEMPOS.get(str(args.get("tempo") or "medium").lower(), TEMPOS["medium"])
+        secs = min(40.0, max(8.0, _num(args.get("seconds")) or 20.0))
+        beats = max(8, min(64, int(round(secs * bpm / 60 / 4)) * 4))
+        plan = await self.hub.body.dance(bpm, beats, plan_only=True)
+        if plan.get("error"):
+            return plan
+        pcm = music.make_track(bpm, plan["intro_beats"], plan["beats"], plan["outro_s"])
+        if self.dancing and not self.dancing.done():
+            self.dancing.cancel()
+        self.posture_ok = False
+        self.dancing = asyncio.create_task(self.run_dance(bpm, beats, pcm, plan["seconds"]))
+        return {"started": True, "dance_s": plan["seconds"], "bpm": bpm,
+                "note": "The music starts now and you dance to it: one short line, don't say it is finished."}
+
+    async def run_dance(self, bpm, beats, pcm, seconds):
+        self.music_started.clear()
+        self.dancing_until = time.monotonic() + seconds + 3.0
+        self.send(type="music", sr=music.SR, seconds=round(len(pcm) / music.SR, 2))
+        self.out.put_nowait(("bytes", pcm.tobytes()))
+        try:
+            await asyncio.wait_for(self.music_started.wait(), 4.0)    # in step with the phone's speaker
+        except asyncio.TimeoutError:
+            log.info("the browser did not report the music starting; dancing anyway")
+        try:
+            r = await self.hub.body.dance(bpm, beats)
+            if r.get("error"):
+                self.send(type="music_stop")
+                self.body_note(f"The dance could not start: {r['error']}")
+                return
+            ended = await self.wait_motion(r.get("seconds"))
+            if ended != "done":
+                self.send(type="music_stop")
+        finally:
+            self.dancing_until = 0.0
+
+    async def take_photo(self):
+        body = self.hub.body
+        st = await body.status()
+        if st.get("state") == "running":
+            return {"error": f"a task run is in progress ('{st.get('task')}')"}, None
+        cam = (st.get("cameras") or ["wrist"])[0]
+        self.posture_ok = False
+        r = await body.follow(True)          # stands up facing forward, then keeps the face in the middle
+        if r.get("error"):
+            return r, None
+        try:
+            t_end = time.monotonic() + (r.get("getting_up_s") or 0) + 5.0
+            while time.monotonic() < t_end:
+                face = (await body.status()).get("face") or {}
+                if face.get("seen") and abs(face.get("ex") or 1) < 0.2 and abs(face.get("ey") or 1) < 0.25:
+                    break
+                await asyncio.sleep(0.25)
+            self.say("Üç, iki, bir... gülümse!" if self.lang == "tr" else "Three, two, one... smile!")
+            await self.wait_spoken(8)
+            jpg, face = await body.photo(cam)
+        finally:
+            await body.follow(False)
+        self.hub.photos_dir.mkdir(parents=True, exist_ok=True)
+        stamp, k = time.strftime("%Y%m%d-%H%M%S"), 1
+        name = f"{stamp}.jpg"
+        while (self.hub.photos_dir / name).exists():
+            k += 1
+            name = f"{stamp}-{k}.jpg"
+        (self.hub.photos_dir / name).write_bytes(jpg)
+        self.send(type="photo", name=name, face=face)
+        log.info("photo %s (face %s)", name, face)
+        return ({"taken": True, "file": name, "face_in_photo": face,
+                 "note": "The photo is in the chat; you can see it below. Say one nice, honest thing about it."},
+                base64.b64encode(jpg).decode())
+
+    async def timer_fired(self, text, missed_at=None):
+        self.send(type="timer_fired", text=text)
+        self.send(type="timers", timers=self.hub.timer_list(self))
+        if (self.hub.robot_status or {}).get("state") == "idle":
+            try:
+                await self.hub.body.gesture("hello")      # a wave with it
+            except Exception:  # noqa: BLE001
+                pass
+        when = (f"went off at {time.strftime('%H:%M', time.localtime(missed_at))} while nobody was connected"
+                if missed_at else "is up")
+        await self.report(f"[Timer] The timer you set {when}: \"{text}\". Tell the user now, in one short sentence.")
+
+    # ---------------------------------------------------------------- body language
+    def maybe_express(self, sentence):
+        if not self.settings.get("bodyLanguage") or time.monotonic() - self.last_express < 4.0:
+            return
+        if (self.hub.robot_status or {}).get("state") != "idle" or self.plan_running():
+            return
+        kind = next((k for k, rx in EXPRESS_RULES if rx.search(sentence.strip())), None)
+        if kind:
+            self.last_express = time.monotonic()
+            asyncio.create_task(self._express(kind))
+
+    async def _express(self, kind):
+        try:
+            r = await self.hub.body.express(kind)
+            if r.get("error"):
+                log.debug("no %s: %s", kind, r["error"])
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _posture_loop(self):
+        """Body language: stand up (calmly, facing forward) when someone talks while the arm rests at its
+        start pose; back down after a quiet minute. Not again after a go home / stop / task until things
+        have been quiet for a minute."""
+        while True:
+            await asyncio.sleep(1.0)
+            try:
+                quiet = time.monotonic() - self.last_talk
+                if quiet > 60:
+                    self.posture_ok = True
+                if quiet >= 10:
+                    self.wake_pending = False
+                if not self.settings.get("bodyLanguage") or self.plan_running() \
+                        or time.monotonic() < self.dancing_until or self.seg.in_speech:
+                    continue
+                act = posture_step(self.hub.robot_status or {}, quiet, self.wake_pending, self.posture_up,
+                                   self.posture_ok)
+                if act == "up":
+                    self.wake_pending = False
+                    r = await self.hub.body.pose("portrait", gentle=True)
+                    self.posture_up = bool(r.get("started"))
+                elif act == "down":
+                    self.posture_up = False
+                    await self.hub.body.home()
+            except Exception as e:  # noqa: BLE001
+                log.debug("posture: %s", e)
 
     async def task_looks_done(self, instr, cam):
         jpg = await self.hub.body.frame(cam)
