@@ -10,6 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent.brain import (EXPRESS_RULES, TAG, health_report, posture_step, is_echo, is_parrot,  # noqa: E402
                          is_stop_command, parse_move, parse_step)
+from agent.film import SR, Soundtrack  # noqa: E402
+from agent.trials import answer  # noqa: E402
 
 SAID = ["Selaaam kanki, hoş geldin! Bugün nasılsın?", "Tamam, kalemi kaseye koyuyorum.",
         "I wasn't trained for that, but I'll give it a shot!"]
@@ -110,6 +112,60 @@ def test_health_report():
          "temp_c": {"elbow_flex": 58, "gripper": 40}, "min_volt_v": 11.9}
     r = health_report({"health": h})
     assert r["verdict"] == "warm" and r["hottest_motor"] == "elbow_flex" and r["cuts_out_at_c"] == 70
+
+
+def test_test_mode_answers():
+    for yes in ("Evet", "oldu", "Oldu oldu!", "başarılı", "Yes", "it worked", "yeah"):
+        assert answer(yes, "verdict") is True, yes
+    for no in ("Hayır", "olmadı", "Olmamış", "başarısız", "No", "nope", "it failed", "it didn't work"):
+        assert answer(no, "verdict") is False, no
+    for unclear in ("evet ama hayır", "bence kalem biraz dışarıda kaldı ama yine de sayalım", "tamam", "", "hmm"):
+        assert answer(unclear, "verdict") is None, unclear
+    for ready in ("hazır", "Hazırım", "tamam", "devam", "ready", "okay go", "bitti"):
+        assert answer(ready, "ready") is True, ready
+    for other in ("bir dakika", "neden düştü kalem", "evet"):
+        assert answer(other, "ready") is None, other
+    # her own test questions never contain the answers they wait for (an answer said over her is
+    # echo-checked: "oldu" right after "Sence oldu mu?" would be dropped as her echo)
+    asks = {"verdict": ("3. deneme bitti, bana kalem kasede gibi görünüyor. Sen ne dersin?",
+                        "Trial 3 is done: the pen looks like it is in the bowl. Did it work?"),
+            "ready": ("Yazdım. Kalemi masaya geri koy, bitince bana söyle.",
+                      "3. deneme yarıda kaldı, sayılmayacak. Kalemi yerine koyunca bana söyle, tekrar deneriz.",
+                      "Got it. Put the pen back on the table, then tell me.",
+                      "Trial 3 didn't finish, so it doesn't count. Put the pen back, then tell me and we'll redo it.")}
+    words = {"verdict": ("oldu", "olmadı", "evet", "hayır", "yes", "no", "worked", "failed"),
+             "ready": ("hazır", "tamam", "devam", "bitti", "ready", "done", "okay", "go")}
+    for kind, lines in asks.items():
+        for line in lines:
+            for word in words[kind]:
+                assert not is_echo(word, [line]), (word, line)
+
+
+def test_soundtrack_timing():
+    import numpy as np
+    tr = Soundtrack()
+    t0 = 1000.0
+    one = np.ones(SR, np.float32) * 0.5               # 1 s of "speech" at the soundtrack's rate
+    tr.add_speech(one, SR, t0 + 1.0)                  # plays from ~1.03 s
+    tr.add_speech(one, SR, t0 + 1.2)                  # queued: right after the first, ~2.03 s
+    out = tr.render(t0, 4.0)
+    nz = np.flatnonzero(out)
+    assert abs(nz[0] / SR - 1.03) < 0.01 and abs(nz[-1] / SR - 3.03) < 0.01
+    tr.cut(t0 + 2.5)                                  # barge-in: the second sentence stops there
+    out = tr.render(t0, 4.0)
+    assert abs(np.flatnonzero(out)[-1] / SR - 2.5) < 0.01
+    # the microphone: frames arrive with jitter but play back to back; a long silence (mic off) is kept
+    tr = Soundtrack()
+    frame = (np.ones(512, np.int16) * 8000).tobytes()
+    at = t0 + 0.032
+    for k in range(10):
+        tr.add_mic(frame, at + (0.01 if k % 2 else 0.0))
+        at += 0.032
+    tr.add_mic(frame, t0 + 3.0)
+    out = tr.render(t0, 4.0)
+    nz = np.flatnonzero(out)
+    assert nz[0] / SR < 0.002 and abs(np.flatnonzero(out[:SR * 2])[-1] / SR - 0.32) < 0.01
+    assert abs(nz[-1] / SR - 3.0) < 0.01 and out.max() <= 0.99
 
 
 if __name__ == "__main__":

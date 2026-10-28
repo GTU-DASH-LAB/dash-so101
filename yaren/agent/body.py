@@ -69,6 +69,18 @@ class Body:
     async def express(self, kind):
         return await self._post("/express", kind=kind)
 
+    async def hold(self, action):
+        return await self._post("/hold", action=action)
+
+    async def film(self, action, max_seconds=None):
+        r = await self.http.post("/film", json={"action": action, "max_seconds": max_seconds},
+                                 timeout=httpx.Timeout(45.0, connect=2.0))   # stop waits for ffmpeg to finish
+        r.raise_for_status()
+        return r.json()
+
+    async def stall(self, on=None, test=None):
+        return await self._post("/stall", on=on, test=test)
+
     async def frame(self, camera, upright=False):
         r = await self.http.get(f"/camera/{camera}.jpg", params={"upright": 1} if upright else None)
         r.raise_for_status()

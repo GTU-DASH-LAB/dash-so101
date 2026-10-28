@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from .body import Body
 from .brain import PERSONA, TOOLS, Session, _num
 from .ears import Ears
+from .film import CLIPS
 from .llm import LLM
 from .memory import STORES, Memory
 from .voice import Voice
@@ -86,6 +87,8 @@ class Hub:
         self.timers = {}           # id -> {id, owner, text, due, task}; owner = the browser tab's id
         self.missed = []           # timers that fired while nobody was connected: told to the next one
         self.was_warm = False
+        self.stall_at = 0.0        # the last stall / gripper event already told (robot_server's time)
+        self.hold_at = 0.0
 
     async def poll_robot(self):
         while True:
@@ -93,6 +96,8 @@ class Hub:
                 self.robot_status, self.robot_error = await self.body.status(), None
                 self.log_runs(self.robot_status)
                 self.note_health(self.robot_status)
+                self.note_stall(self.robot_status)
+                self.note_hold(self.robot_status)
             except Exception as e:  # noqa: BLE001
                 self.robot_status, self.robot_error = None, f"{type(e).__name__}: {e}"
             msg = {"type": "robot", "status": self.robot_status, "error": self.robot_error, "llm": self.llm_ready}
@@ -117,6 +122,33 @@ class Hub:
                 s.body_note(f"Your {h['hottest']} motor is getting warm: {h['max_temp_c']} C (it cuts out at "
                             f"{h['limit_c']} C). If you are asked for a lot more work, suggest a short rest.")
         self.was_warm = warm
+
+    def _newest(self):
+        return max(self.sessions, key=lambda s: s.started, default=None)
+
+    def note_stall(self, status):
+        """robot_server.py stopped a blocked joint: every conversation hears it, the newest one says it.
+        One that happened before this server started is not news."""
+        last = (status.get("stall") or {}).get("last")
+        if not last or (last.get("at") or 0) <= self.stall_at:
+            return
+        news = self.stall_at > 0 or time.time() - last["at"] < 10
+        self.stall_at = last["at"]
+        if news:
+            newest = self._newest()
+            for s in list(self.sessions):
+                s.on_stall(last, s is newest)
+
+    def note_hold(self, status):
+        ev = (status.get("hold") or {}).get("event")
+        if not ev or (ev.get("at") or 0) <= self.hold_at:
+            return
+        news = self.hold_at > 0 or time.time() - ev["at"] < 10
+        self.hold_at = ev["at"]
+        if news:
+            newest = self._newest()
+            for s in list(self.sessions):
+                s.on_hold_event(ev, s is newest)
 
     # ---- timers: they belong to the browser tab that set them and survive its reconnects
     @staticmethod
@@ -271,6 +303,14 @@ def make_app(hub, token):
             raise HTTPException(404, "no such photo")
         return FileResponse(f, media_type="image/jpeg")
 
+    @app.get("/api/clips/{name}")
+    def clip(name: str, request: Request):
+        check(req_token(request))
+        f = CLIPS / name
+        if not re.fullmatch(r"\d{8}-\d{6}_[a-z]+(_[0-9a-z_]+)?(-\d+)?\.mp4", name) or not f.is_file():
+            raise HTTPException(404, "no such clip")
+        return FileResponse(f, media_type="video/mp4")
+
     @app.get("/api/camera/{name}.jpg")
     async def camera_jpg(name: str, request: Request):
         check(req_token(request))
@@ -319,6 +359,8 @@ def make_app(hub, token):
         session.send(type="hello", health=hub.health(), settings=session.settings,
                      resumed=session.resumed, transcript=session.transcript() if session.resumed else [],
                      timers=hub.timer_list(session))
+        if session.test is not None:
+            session.test.send()
         hub.deliver_missed(session)
         try:
             while True:
@@ -355,6 +397,14 @@ def make_app(hub, token):
                 elif t == "hush":
                     await session.interrupt("hush button")
                     session._settle()
+                elif t == "test":
+                    await session.test_input(ev)
+                elif t == "film":
+                    await session.film_button(bool(ev.get("on")))
+                elif t == "hold":
+                    await session.hold_button(str(ev.get("action") or "release"))
+                elif t == "stall":
+                    await hub.body.stall(on=bool(ev.get("on")))
         except WebSocketDisconnect:
             pass
         except Exception:  # noqa: BLE001

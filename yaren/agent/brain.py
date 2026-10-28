@@ -21,6 +21,9 @@ import time
 from pathlib import Path
 
 from .ears import Segmenter
+from .film import Soundtrack, clip_name, finish_clip
+from .trials import MAX_TRIALS, TestRun
+from .trials import answer as test_answer
 from .voice import guess_lang
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -42,8 +45,8 @@ ACTION_CLAIM = re.compile(
 INTENT_Q = ('Someone said this to a robot arm: "{t}"\nAre they asking the arm to physically do something now: '
             'move, pick up, put, try a task, go back or home, stand up, dance, nod, wave, say hi or hello to '
             'someone ("say hi", "selam ver", "merhaba de": a greeting gesture), move one of its parts, take a '
-            'photo, follow or look at them, copy the leader arm, learn a movement they show, or repeat one it '
-            'learned? Questions about what it can do, how it is, or '
+            'photo, follow or look at them, copy the leader arm, learn a movement they show, repeat one it '
+            'learned, hold something for them or give it back, or run test trials? Questions about what it can do, how it is, or '
             'what happened are NOT requests, and neither is greeting the arm itself ("hi", "merhaba"). '
             'Answer with one word: YES or NO.')
 NUDGE = ("[Robot body event] You said you are doing something, but you did not call any tool, so the arm did "
@@ -62,7 +65,7 @@ MEMORY_NUDGE = ("[Robot body event] You said you saved or deleted something in y
                 "no memory tool, so nothing changed. If the user asked you to remember or forget something, "
                 "call remember or forget now. Do not say anything more. Otherwise reply with an empty message.")
 MOTION_TOOLS = {"do_task", "stop_robot", "go_home", "gesture", "move_part", "hand_guide", "teach", "replay",
-                "mirror", "follow_face", "dance", "take_photo", "run_plan"}
+                "mirror", "follow_face", "dance", "take_photo", "run_plan", "hold", "test"}
 MEMORY_TOOL_NAMES = {"remember", "forget"}
 # The same miss for gestures, without any claim: asked to "say hi", qwen often only says "Hi!". When the
 # user's words name a gesture or a body part and nothing moved, the intent check decides about a nudge.
@@ -71,7 +74,8 @@ MOVE_ASK = re.compile(
     r"ayağa kalk|stand up|kaldır|indir|\braise|\blift|\blower|\bturn\b|\bdön|çevir|\bopen\b|\baç\b|\bclose\b|"
     r"kapat|elbow|dirse|wrist|bile[ğk]|shoulder|omuz|gripper|ağz|mouth|alkış|clap|look around|etrafına bak|"
     r"by hand|elle|gravity|yerçekimi|hand.?guid|fotoğraf|\bfoto\b|photo|picture|selfie|resmimi|takip et|follow me|"
-    r"look at me|bana bak|taklit|copy me|mirror|öğret|teach you|show you|göstereyim|tekrar et|do it again|müzik)", re.I)
+    r"look at me|bana bak|taklit|copy me|mirror|öğret|teach you|show you|göstereyim|tekrar et|do it again|müzik|"
+    r"\btut\b|tutar mısın|hold (this|it|on to)|geri ver|give it back|elimden al|\btest\b|deneme yap|trials?\b)", re.I)
 MOVE_NUDGE = ("[Robot body event] The user asked for a movement, but you called no tool, so the arm did not "
               "move. Call the right tool now (gesture for body language, move_part for one part). Do not say "
               "anything more: the user already heard you. If no movement was asked for, reply with an empty message.")
@@ -206,6 +210,18 @@ in one short sentence; a [Robot body event] tells you when it ends. Not for a si
 - After a pen run you look at the table from above to check your work, and try once more if the pen is \
 still on the table; a [Robot body event] tells you what you saw. Your camera check is good, not perfect: \
 say "it looks like", not "I'm sure".
+- hold: be a third hand ("bunu tut", "hold this"). If your gripper is closed, call hold open and tell them \
+to put it between your fingers; once it is in (they say "tamam", or it already was), call hold grip: you \
+close gently until you feel it and keep holding. release gives it back - only when they hold it, or it \
+falls. While you hold something you do no task.
+- film: start / stop filming your wrist camera for Fouad's videos ("bunu çek", "film this"); the clip, with \
+your voices, appears in the chat. Runs are filmed by themselves when "film every run" is on.
+- test: test mode for Fouad's results ("10 deneme yap", "run 20 trials", max 30): the pen task again and \
+again. After each trial you check from above and ask the user whether it worked: call test verdict with \
+their answer. Then they put the pen back and say ready: call test ready. stop ends it. A [Robot body \
+event] tells you the score at the end. During a test do no other moves.
+- If your body tells you a joint was blocked, something or someone was in the way: say so, ask if \
+everyone is okay, and don't move until they ask.
 After do_task, the run lasts until it ends by itself or is stopped; a message tagged [Robot body \
 event] tells you how it ended (also when the user pressed the STOP or home button). Those messages come \
 from your body, not from the user. Whenever the user asks you to act, call do_task - never assume an \
@@ -337,7 +353,29 @@ TOOLS = [
             "repeat": {"type": "integer", "description": "Rounds, 1-5 (default 1)."},
             "while": {"type": "string", "description": "Optional yes/no question checked from above before "
                                                        "each round; the plan stops when the answer is NO."}}}}},
+    {"type": "function", "function": {
+        "name": "hold", "description": "Third hand: hold something for the user in your gripper, or give it back.",
+        "parameters": {"type": "object", "required": ["action"], "properties": {
+            "action": {"type": "string", "enum": ["open", "grip", "release"],
+                       "description": "open: open your gripper so they can put something in. grip: close gently "
+                                      "until you feel it, and keep holding. release: open and give it back."}}}}},
+    {"type": "function", "function": {
+        "name": "film", "description": "Film your wrist camera (with your voices) into a clip for Fouad's videos.",
+        "parameters": {"type": "object", "required": ["action"], "properties": {
+            "action": {"type": "string", "enum": ["start", "stop"]}}}}},
+    {"type": "function", "function": {
+        "name": "test", "description": "Test mode: the pen task several times in a row, scored by the user.",
+        "parameters": {"type": "object", "required": ["action"], "properties": {
+            "action": {"type": "string", "enum": ["start", "verdict", "ready", "stop", "status"],
+                       "description": "start: begin (trials). verdict: the user said whether the last trial "
+                                      "worked (success). ready: the pen is back, go on. stop: end the test now. "
+                                      "status: the score so far."},
+            "trials": {"type": "integer", "description": f"start: how many, 1-{MAX_TRIALS} (default 10)."},
+            "success": {"type": "boolean", "description": "verdict: true if it worked, false if not."}}}}},
 ]
+# what people call the joints robot_server.py reports a stall for (motions.PARTS)
+JOINT_PART = {"shoulder_pan": "base", "shoulder_lift": "shoulder", "elbow_flex": "elbow", "wrist_flex": "wrist",
+              "wrist_roll": "wrist roll", "gripper": "gripper"}
 
 
 def is_stop_command(text):
@@ -447,7 +485,8 @@ class Session:
         self.started = time.monotonic()
         self.history = []
         self.settings = {"lang": "auto", "voice": hub.cfg["default_voice"], "bargeIn": True,
-                         "handsFree": True, "speak": True, "bodyLanguage": True, "checkWork": True, "angry": False}
+                         "handsFree": True, "speak": True, "bodyLanguage": True, "checkWork": True, "angry": False,
+                         "filmRuns": True}
         self.lang = "tr"
         self.seg = Segmenter(silence_ms=hub.cfg["silence_ms"])
         self.ptt = False
@@ -470,6 +509,9 @@ class Session:
         self.wake_pending = False    # someone started talking: stand up to chat (when at home and allowed)
         self.posture_up = False
         self.posture_ok = True       # off after go home / stop / a task..., back on after a quiet minute
+        self.film = None             # {kind, track}: a clip is being filmed (kind run / trial / film)
+        self.calm_until = 0.0        # no body language until then (monotonic): after a stall
+        self.test = None             # trials.TestRun (kept after it ends, for its score)
         self.state = None
         # The memory is read once per conversation (Hermes Agent's "frozen snapshot"): what is written
         # during it is on disk at once but shows up in the prompt next time, so the prefix stays cached.
@@ -481,6 +523,9 @@ class Session:
             self.history, self.lang, self.base_system = saved["history"], saved["lang"], saved["system"]
             self.settings.update(saved["settings"])
             self.resumed = True
+            if saved.get("test") is not None and saved["test"].running:   # a test goes on in this tab
+                self.test = saved["test"]
+                self.test.session = self
         # No per-conversation warm-up: with qwen3.8 on Ollama 0.40.9 only a request that extends the
         # previous one reuses the cache, so a warm-up request saved nothing (1,666 tokens: 390-440 ms
         # prefill with or without it; follow-up turns of a conversation: ~155 ms).
@@ -504,7 +549,7 @@ class Session:
     def snapshot(self):
         """What a reconnect of the same browser tab picks up again (see RESUME_S)."""
         return {"at": time.time(), "history": self.history, "lang": self.lang, "system": self.base_system,
-                "settings": dict(self.settings)}
+                "settings": dict(self.settings), "test": self.test if self.test and self.test.running else None}
 
     def transcript(self, n=40):
         """The conversation as the chat shows it, for a page that reloaded."""
@@ -538,9 +583,13 @@ class Session:
         for t in [*self.tasks, self.turn, self.monitor, self.plan, self.dancing]:
             if t and not t.done():
                 t.cancel()
+        if self.film is not None:       # a clip filmed for this tab ends with it (a running test goes on:
+            asyncio.create_task(self.film_stop(None, "cut"))   # the tab's next connection takes it over)
 
     # ---------------------------------------------------------------- input
     async def on_audio(self, pcm):
+        if self.film is not None:
+            self.film["track"].add_mic(pcm, time.time())
         if not (self.settings["handsFree"] or self.ptt):
             return
         if self.client_playing and not self.settings["bargeIn"] and not self.ptt:
@@ -621,7 +670,7 @@ class Session:
         self.wake_pending = True
         robot = self.hub.robot_status or {}
         if is_stop_command(text) and (robot.get("state") in ("running", "homing", "moving", "guiding", "mirroring",
-                                                             "following") or self.plan_running()):
+                                                             "following", "gripping") or self.activity_running()):
             await self.interrupt("stop command")
             self.end_activities()
             try:
@@ -634,6 +683,18 @@ class Session:
             self.history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
             self.say(reply)
             return
+        t = self.test
+        if t is not None and t.waiting:          # the test asked: a short clear answer needs no LLM
+            kind = t.waiting[0]
+            ans = test_answer(text, kind)
+            if ans is not None:
+                await self.interrupt(None)
+                self.history.append({"role": "user", "content": text})
+                t.give(kind, ans)
+                self.send(type="tool", name="test", args={"action": kind, **({"success": ans} if kind == "verdict" else {})},
+                          result={"fast_path": True})
+                self._settle()
+                return
         await self.interrupt(None)
         # The reply language follows the speaker; a per-message hint is far more reliable than the
         # system prompt alone once the conversation has switched languages.
@@ -657,6 +718,8 @@ class Session:
         self.play_until = 0.0
         self.ducked = False
         self.send(type="audio_stop")
+        if self.film is not None:
+            self.film["track"].cut(time.time())
 
     def body_note(self, text):
         """Something the LLM must know about the arm that did not come from its own tool calls. No
@@ -666,9 +729,15 @@ class Session:
     def plan_running(self):
         return self.plan is not None and not self.plan.done()
 
+    def test_running(self):
+        return self.test is not None and self.test.running
+
+    def activity_running(self):
+        return self.plan_running() or self.test_running()
+
     def end_activities(self):
-        """STOP: no plan goes on to its next step, no music, no standing up to chat until things are quiet."""
-        for t in (self.plan, self.dancing):
+        """STOP: no plan goes on to its next step, no test, no music, no standing up to chat until things are quiet."""
+        for t in (self.plan, self.dancing, self.test.task if self.test else None):
             if t and not t.done():
                 t.cancel()
         self.dancing_until = 0.0
@@ -750,6 +819,8 @@ class Session:
                 self.send(type="audio", seq=seq, sr=self.hub.voice.sr, text=text, lang=lang, gen=gen,
                           tts_ms=round((time.perf_counter() - t) * 1000), seconds=round(len(audio) / self.hub.voice.sr, 2))
                 self.out.put_nowait(("bytes", pcm))
+                if self.film is not None:
+                    self.film["track"].add_speech(audio, self.hub.voice.sr, time.time())
             except Exception as e:  # noqa: BLE001
                 log.exception("tts failed")
                 self.send(type="error", message=f"TTS: {e}")
@@ -931,10 +1002,17 @@ class Session:
     async def run_tool(self, name, args):
         body = self.hub.body
         try:
+            if self.test_running() and name in MOTION_TOOLS - {"stop_robot", "go_home", "test"}:
+                t = self.test
+                return {"error": f"a test is running (trial {t.trial} of {t.n}, {t.phase}): no other moves until it "
+                                 "ends - test stop ends it"}, None
             if name == "do_task":
                 instr = str(args.get("instruction", "")).strip() or TRAINED_TASK
+                filming = self.settings.get("filmRuns", True) and await self.film_start("run")
                 res = await body.task(instr, self.hub.cfg["task_timeout"])
                 if res.get("error"):
+                    if filming:
+                        await self.film_stop("run", "not_started")
                     return res, None
                 self.posture_ok = False
                 trained = instr.lower().rstrip(".") == TRAINED_TASK.lower()
@@ -1023,6 +1101,28 @@ class Session:
                 return res, None
             if name == "run_plan":
                 return self.start_plan(args), None
+            if name == "hold":
+                action = str(args.get("action") or "grip").strip().lower()
+                if action not in ("open", "grip", "release"):
+                    return {"error": "action: open, grip or release"}, None
+                res = await body.hold(action)
+                if action == "grip" and res.get("gripping"):
+                    res = await self.wait_grip()
+                if action != "release" and not res.get("error"):
+                    self.posture_ok = False
+                return res, None
+            if name == "film":
+                if str(args.get("action", "start")).lower() == "stop":
+                    if self.film is None:
+                        return {"error": "nothing is being filmed"}, None
+                    return {"stopped": True, "clip": await self.film_stop(None, None),
+                            "note": "The clip is in the chat."}, None
+                if self.film is not None:
+                    return {"filming": True, "already": True, "kind": self.film["kind"]}, None
+                return ({"filming": True, "note": "Filming now, up to 5 minutes; say stop filming to end it."}
+                        if await self.film_start("film") else {"error": "the camera could not start filming"}), None
+            if name == "test":
+                return await self.test_tool(args), None
             return {"error": f"unknown tool {name}"}, None
         except Exception as e:  # noqa: BLE001
             log.exception("tool %s failed", name)
@@ -1065,29 +1165,36 @@ class Session:
                     return "done"
 
     async def watch(self, instr, attempt=1):
-        """Follow a run until it ends, check the work from above (the pen task), and tell the user."""
+        """Follow a run until it ends, check the work from above (the pen task), and tell the user. A clip
+        filmed for the run ends here, labelled with how it went."""
         hub, cfg = self.hub, self.hub.cfg
         ended = await self.follow_run(instr)
         if ended == "replaced":
-            return
+            return                   # the newer run's watch goes on (and ends its clip)
         if ended == "cancelled":
+            await self.film_stop("run", "not_started")
             self.body_note(f"The run '{instr}' never started: it was stopped while the arm went to its start pose.")
             return
         st = await hub.body.status()
         secs = (st.get("last_result") or {}).get("seconds")
         self.send(type="run_end", task=instr, ended=ended, seconds=secs)
         if ended == "stopped":
+            await self.film_stop("run", "stopped", {"instruction": instr, "run_ended": ended, "run_seconds": secs})
             self.body_note(f"The run '{instr}' was stopped after {secs} s; the arm holds where it is.")
             return  # whoever stopped it already knows
         trained = instr.lower().rstrip(".") == TRAINED_TASK.lower()
         checking = ended in ("done", "timeout") and trained and self.settings.get("checkWork", True)
+        part = JOINT_PART.get(((st.get("stall") or {}).get("last") or {}).get("joint"), "arm")
         what = {"done": "your vision check sees the task finished, so the run was stopped and the arm is going home",
                 "timeout": (f"the {cfg['task_timeout']:.0f} s time limit ran out"
                             + (" and your camera check did not see it finished" if cfg["done_check"] else "")
                             + ("" if checking else "; you don't know whether it worked") + ", and the arm is going home"),
                 "overheat": "a motor got too hot, so the run was stopped and the arm is going home to cool down",
+                "blocked": (f"SAFETY STOP - your {part} was blocked: something or someone was in the way, so the run "
+                            "stopped, the arm backed off a little and holds there (it did not go home). Ask if "
+                            "everyone is okay; don't move again until they ask"),
                 "error": f"it failed with an error: {st.get('error')}"}.get(ended, ended)
-        check = ""
+        check, label = "", ended
         if checking:
             res = await self.check_pen()
             v = res["verdict"]
@@ -1100,12 +1207,15 @@ class Session:
                         "Tell the user in one short sentence."))
                     await self.watch(instr, attempt=2)
                     return
+            label = {"success": "success", "fail": "fail"}.get(v, ended)
             check = {"success": " Then you looked at the table from above: the pen looks like it is in the bowl.",
                      "fail": " Then you looked at the table from above: the pen is still lying on the table"
                              + (", even after your second try." if attempt > 1 else "."),
                      "unsure": " Then you looked at the table from above but saw no pen, neither on the table "
                                "nor in the bowl (it may be out of view).",
                      "unknown": f" You could not check from above ({res.get('why')})."}[v]
+        await self.film_stop("run", label, {"instruction": instr, "run_ended": ended, "run_seconds": secs,
+                                            "camera_check": label if checking else None, "attempts": attempt})
         await self.report(f"[Robot body event] The run '{instr}' ended after {secs} s: {what}.{check} "
                           "Tell the user in one short sentence.")
 
@@ -1239,7 +1349,7 @@ class Session:
                 self.send(type="plan", round=rnd, step=i, of=len(steps), text=f"{kind}: {arg}".rstrip(": "))
                 r = await self.plan_step(kind, arg)
                 done.append(f"{kind} {arg}".strip() + f" -> {r}")
-                if r in ("stopped", "cancelled", "replaced", "timeout", "overheat") or r.startswith("error"):
+                if r in ("stopped", "cancelled", "replaced", "timeout", "overheat", "blocked") or r.startswith("error"):
                     return f"stopped at step {i} of round {rnd} ({kind} {arg}): {r}"
         return "finished all its steps"
 
@@ -1312,6 +1422,8 @@ class Session:
             await asyncio.wait_for(self.music_started.wait(), 4.0)    # in step with the phone's speaker
         except asyncio.TimeoutError:
             log.info("the browser did not report the music starting; dancing anyway")
+        if self.film is not None:
+            self.film["track"].add_sound(pcm.astype("float32") / 32768, music.SR, time.time())
         try:
             r = await self.hub.body.dance(bpm, beats)
             if r.get("error"):
@@ -1371,11 +1483,174 @@ class Session:
                 if missed_at else "is up")
         await self.report(f"[Timer] The timer you set {when}: \"{text}\". Tell the user now, in one short sentence.")
 
+    # ---------------------------------------------------------------- film, test mode, third hand, stalls
+    async def film_start(self, kind):
+        """Start a clip - the camera on the robot side, the sound here. True only if this call started one
+        (a clip already rolling just goes on, and whoever started it ends it)."""
+        if self.film is not None:
+            return False
+        try:
+            r = await self.hub.body.film("start")
+        except Exception as e:  # noqa: BLE001
+            log.warning("film start failed: %s", e)
+            return False
+        if r.get("error") or r.get("already"):
+            log.info("no new clip: %s", r.get("error") or "the camera is already filming")
+            return False
+        self.film = {"kind": kind, "track": Soundtrack()}
+        self.send(type="film", on=True, kind=kind)
+        return True
+
+    async def film_stop(self, kind=None, label=None, meta=None, announce=True):
+        """End the clip if one of this kind (any, if None) is rolling: its file name in videos_for_editing/.
+        announce=False: the chat hears of it later (its label is not decided yet)."""
+        f = self.film
+        if f is None or (kind and f["kind"] != kind):
+            return None
+        self.film = None
+        self.send(type="film", on=False, kind=f["kind"])
+        try:
+            raw = await self.hub.body.film("stop")
+            if not raw.get("ok"):
+                raise RuntimeError(raw.get("error") or "no picture")
+            name = await finish_clip(raw, f["track"], clip_name(raw.get("t0"), f["kind"], label),
+                                     {"kind": f["kind"], "label": label, **(meta or {})})
+        except Exception as e:  # noqa: BLE001
+            log.warning("clip failed: %s", e)
+            self.send(type="error", message=f"clip: {e}")
+            return None
+        if announce:
+            self.send(type="clip", name=name, kind=f["kind"], label=label, seconds=raw.get("seconds"))
+        return name
+
+    async def film_button(self, on):
+        if on and self.film is None and not await self.film_start("film"):
+            self.send(type="error", message="the camera could not start filming")
+        elif not on:
+            await self.film_stop(None, None)
+
+    async def test_tool(self, args, button=False):
+        action = str(args.get("action") or "status").strip().lower()
+        t = self.test
+        if action == "start":
+            if self.test_running():
+                return {"error": "a test is already running", **t.state()}
+            st = await self.hub.body.status()
+            if (st.get("hold") or {}).get("state"):
+                return {"error": "you are holding something: give it back first"}
+            if st.get("state") in ("running", "gripping", "guiding", "mirroring"):
+                return {"error": f"the arm is busy ({st.get('state')}): stop that first"}
+            n = max(1, min(MAX_TRIALS, int(_num(args.get("trials")) or 10)))
+            if self.plan_running():
+                self.plan.cancel()
+            self.posture_ok = False
+            self.test = TestRun(self, n, TRAINED_TASK, dry=bool(st.get("dry")))
+            if button:
+                self.body_note(f"The user started a test of {n} trials with the button.")
+            return {"started": True, "trials": n, "task": TRAINED_TASK,
+                    "note": "It runs by itself: after each trial you ask whether it worked, then they put the pen "
+                            "back. Say in one short sentence that the test starts."}
+        if t is None:
+            return {"error": "no test has run yet"}
+        if action in ("verdict", "ready"):
+            if not t.running:
+                return {"error": "the test is over", **t.summary()}
+            ok = args.get("success")
+            if isinstance(ok, str):
+                ok = ok.strip().lower() in ("true", "yes", "1", "evet")
+            if action == "verdict" and ok is None:
+                return {"error": "verdict needs success: true or false"}
+            if not t.give(action, bool(ok) if action == "verdict" else True):
+                return {"error": f"the test is not waiting for {action} now ({t.phase})"}
+            return {"ok": True, "trial": t.trial, "note": "The test goes on by itself: say nothing more."}
+        if action == "stop":
+            if t.running:
+                t.ended = "stopped"
+                t.task.cancel()
+                if (await self.hub.body.status()).get("state") in ("running", "homing", "moving"):
+                    await self.hub.body.stop(home=False)
+            return {"stopping": True, **t.summary(), "note": "A [Robot body event] tells you the final score."}
+        return {**t.state(), "running": t.running}
+
+    async def test_input(self, ev):
+        """The test card's buttons: start (trials), verdict (success), ready, stop."""
+        action = str(ev.get("action") or "")
+        res = await self.test_tool({"action": action, "trials": ev.get("trials"), "success": ev.get("success")},
+                                   button=True)
+        if res.get("error"):
+            self.send(type="error", message=f"test: {res['error']}")
+        elif action == "start":
+            self.say(f"Test başlıyor: {res['trials']} deneme." if self.lang == "tr" else f"Starting a test of {res['trials']} trials.")
+        self.send(type="tool", name="test", args={k: v for k, v in ev.items() if k != "type"}, result={**res, "button": True})
+
+    async def hold_button(self, action):
+        res = await self.hub.body.hold(action)
+        if res.get("error"):
+            self.send(type="error", message=f"hold: {res['error']}")
+        elif action == "release":
+            self.body_note("The user pressed the give-back button: your gripper opened and let go of what it held.")
+        self.send(type="tool", name="hold", args={"action": action}, result={**res, "button": True})
+
+    async def wait_grip(self, timeout=8.0):
+        """After hold grip: until the gripper closed on something, or all the way."""
+        t_req, t_end = time.time(), time.monotonic() + timeout
+        while time.monotonic() < t_end:
+            await asyncio.sleep(0.25)
+            h = (await self.hub.body.status()).get("hold") or {}
+            ev = h.get("event") or {}
+            if h.get("state") == "holding":
+                return {"holding": True, "width_pct": h.get("contact_pct"),
+                        "note": "You hold it now, gently. Tell them; release gives it back."}
+            if ev.get("event") in ("empty", "gave_up") and (ev.get("at") or 0) >= t_req - 1:
+                return {"holding": False, "empty": True,
+                        "note": "Your gripper closed all the way: nothing was in it. Ask them to put it between your "
+                                "fingers (hold open first), then grip again."}
+        return {"holding": False, "error": "the gripper did not report back in time"}
+
+    def on_stall(self, st, speak):
+        """robot_server.py stopped a blocked joint (Hub.note_stall): every tab hears of it, one says it."""
+        part = JOINT_PART.get(st.get("joint"), st.get("joint"))
+        self.calm_until = time.monotonic() + 60.0
+        for t in (self.plan, self.dancing):
+            if t and not t.done():
+                t.cancel()
+        self.dancing_until = 0.0
+        self.send(type="music_stop")
+        self.send(type="stall", part=part, **st)
+        if st.get("while") == "running" and ((self.monitor and not self.monitor.done()) or self.test_running()):
+            return                           # the run's watch() / the test tells it with the run's end
+        doing = {"homing": "going back to your start pose", "mirroring": "copying the leader arm",
+                 "following": "following a face", "running": f"doing the task '{st.get('doing')}'",
+                 "moving": f"doing the move '{st.get('doing')}'"}.get(st.get("while"), st.get("while"))
+        moved = abs(st.get("backed_off_deg") or 0)
+        note = (f"SAFETY STOP: your {part} was blocked while you were {doing}: it could not get where it was sent, "
+                "so something or someone is in the way. You stopped at once"
+                + (f", moved it back {moved:.0f} degrees" if moved else "") + " and you hold there; you will not "
+                "move until they ask.")
+        if speak:
+            asyncio.create_task(self.report(f"[Robot body event] {note} Tell the user in one short sentence and "
+                                            "ask if everyone is okay."))
+        else:
+            self.body_note(note)
+
+    def on_hold_event(self, ev, speak):
+        """What the gripper held was taken out (or slipped): Hub.note_hold."""
+        self.send(type="hold_event", **ev)
+        if ev.get("event") != "taken":
+            return
+        note = "What you held is no longer in your gripper: they took it out, or it slipped. Your hand is empty."
+        if speak:
+            asyncio.create_task(self.report(f"[Robot body event] {note} Say a short okay."))
+        else:
+            self.body_note(note)
+
     # ---------------------------------------------------------------- body language
     def maybe_express(self, sentence):
         if not self.settings.get("bodyLanguage") or time.monotonic() - self.last_express < 4.0:
             return
-        if (self.hub.robot_status or {}).get("state") != "idle" or self.plan_running():
+        st = self.hub.robot_status or {}
+        if st.get("state") != "idle" or self.activity_running() or (st.get("hold") or {}).get("state") \
+                or time.monotonic() < self.calm_until:
             return
         kind = next((k for k, rx in EXPRESS_RULES if rx.search(sentence.strip())), None)
         if kind:
@@ -1402,8 +1677,9 @@ class Session:
                     self.posture_ok = True
                 if quiet >= 10:
                     self.wake_pending = False
-                if not self.settings.get("bodyLanguage") or self.plan_running() \
-                        or time.monotonic() < self.dancing_until or self.seg.in_speech:
+                if not self.settings.get("bodyLanguage") or self.activity_running() \
+                        or time.monotonic() < max(self.dancing_until, self.calm_until) or self.seg.in_speech \
+                        or ((self.hub.robot_status or {}).get("hold") or {}).get("state"):
                     continue
                 act = posture_step(self.hub.robot_status or {}, quiet, self.wake_pending, self.posture_up,
                                    self.posture_ok)
