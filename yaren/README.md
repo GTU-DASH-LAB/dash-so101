@@ -348,7 +348,7 @@ agent/
   music.py        the dance beat (numpy synth, in step with the dance plan)
 web/              React 19 + Vite app (npm run build → web/dist, served by agent/server.py)
 run/              runtime state, git-ignored: pids, logs, token, TLS cert, recorded voices, memory/,
-                  motions/ (taught movements), photos/
+                  motions/ (taught movements; motions_dry/ for --dry, never replayed on the arm), photos/
 ```
 
 ## Troubleshooting

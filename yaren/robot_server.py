@@ -1000,7 +1000,9 @@ def build_body():
     dry_ep = int(pop_opt("--dry-episode", "95"))
     leader_port = pop_opt("--leader-port")
     leader_id = pop_opt("--leader-id", "dash_so101")
-    motions_dir = pop_opt("--motions-dir", str(HERE / "run" / "motions"))
+    # a motion taught in --dry is the replayed episode (a pen pick down to the table), never one to replay
+    # on the real arm: dry runs keep theirs apart
+    motions_dir = pop_opt("--motions-dir", str(HERE / "run" / ("motions_dry" if dry else "motions")))
 
     import lerobot.rollout.context as C
     from lerobot.configs import parser
