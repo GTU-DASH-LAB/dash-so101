@@ -32,7 +32,8 @@ Learning/experiments with the **SO-101** robotic arms and Vision-Language-Action
   pickup.
 - `yaren/` — **Yaren**, the talking robot friend: a local voice agent (React web app + FastAPI;
   Whisper → Qwen3.8 via Ollama → Chatterbox on GPU1) that drives `pen_bowl_molmoact2` (MolmoAct2 +
-  TensorRT, kept warm on GPU0) with the user's request as the task prompt. Not a numbered pipeline:
+  TensorRT, kept warm on GPU0) with the user's request as the task prompt, plus gestures, teaching and
+  replaying movements, leader-arm mirroring, face following, dance, photos, timers and multi-step plans. Not a numbered pipeline:
   `setup.sh` / `start.sh [--dry]` / `stop.sh`, robot settings from the policy folder's `config.env`.
   See `yaren/README.md` and the section below.
 - `daily_progress/` — dated diary (`day1.md`, `day2.md`, …), English + Türkçe.
@@ -388,6 +389,21 @@ narrower x4 PCIe link. Nothing about 78GB/113GB/`free -h` transfers. Re-measure.
   automatically from robot_server's `recent_results`). All live in `MEMORY_DIR` (default
   `run/memory/`, git-ignored) and are read once per conversation into the system prompt. Point an
   exported `MEMORY_DIR` at a scratch folder when testing, so tests don't write into the real memory.
+- **Qwen3.8 copies prompt tags into replies** ("[ear] <the user's words>", "[tool] [tool use]", ~1 in 20
+  first turns), and once one is in the history every later turn copies it and calls no tool - it looks
+  like "she stopped answering". `brain.TAG` strips them from speech and history, and an empty/parroted
+  reply is resampled once. Anything starting with "[" in a user-role message is a body event or timer,
+  not the user (`user_turn`); treat it that way in new code.
+- **robot_server keeps only the newest request**: a second request before the control thread picks up
+  the first replaces it ("replaced by a newer request"). Body-language `express` never replaces a real
+  request, and moves made in one LLM turn wait for the previous move (`until_still`). Keep both when
+  adding motion tools, or a tool call made in the same breath as a nod silently fails.
+- Return plain Python types from robot_server endpoints: a numpy bool in a plan summary made `/replay`
+  answer 500. `test_motions.py` json-dumps the replay summary for that reason.
+- The leader arm (mirror, teaching with it) comes from `LEADER_SERIAL`/`LEADER_ID` in the policy
+  folder's `config.env`; calibration `calibration/teleoperators/so_leader/dash_so101.json`.
+- In `--dry` the joints replay a recorded episode in a loop, so `at_home` only flickers and "stand up to
+  chat" cannot be tested there; `posture_step` is unit-tested in `test_agent.py` instead.
 - Warming Ollama with the session's system prompt does **not** speed up the first turn with
   qwen3.8 on Ollama 0.40.9: only a request that extends the previous one reuses the cache. Measured
   ~400 ms prefill for 1,666 tokens either way, ~155 ms for follow-up turns. Rerun `yaren/selftest.py` against `./start.sh --dry` after changing the
