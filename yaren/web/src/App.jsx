@@ -36,7 +36,7 @@ export default function App() {
   const [robotErr, setRobotErr] = useState(null);
   const [llmReady, setLlmReady] = useState(false);
   const [settings, setSettings] = useState({ lang: "auto", voice: "yaren", bargeIn: true, handsFree: true, speak: true,
-    bodyLanguage: true, checkWork: true, angry: false });
+    bodyLanguage: true, checkWork: true, angry: false, filmRuns: true });
   const [state, setState] = useState("idle");
   const [vad, setVad] = useState(false);
   const [msgs, setMsgs] = useState([]);
@@ -52,6 +52,8 @@ export default function App() {
   const [memOpen, setMemOpen] = useState(false);
   const [memVersion, setMemVersion] = useState(0);
   const [timers, setTimers] = useState([]);   // {id, text, due (ms)}
+  const [test, setTest] = useState(null);      // the test mode's state (trials.TestRun.state)
+  const [trials, setTrials] = useState(10);
   const [now, setNow] = useState(Date.now());
 
   const ws = useRef(null);
@@ -133,6 +135,10 @@ export default function App() {
       case "check": push({ role: "event", kind: "check", ...ev }); break;
       case "timers": showTimers(ev.timers); break;
       case "timer_fired": push({ role: "event", kind: "timer_fired", text: ev.text }); break;
+      case "test": setTest(ev); break;
+      case "clip": push({ role: "clip", name: ev.name, label: ev.label, seconds: ev.seconds, clipKind: ev.kind }); break;
+      case "stall": push({ role: "event", kind: "stall", ...ev }); break;
+      case "hold_event": if (ev.event === "taken") push({ role: "event", kind: "hold_taken" }); break;
       case "memory": setMemVersion((v) => v + 1); break;
       case "llm_stats":
         setPerf((p) => ({ ...p, first: ev.first_sentence_ms ?? p.first,
@@ -369,6 +375,10 @@ export default function App() {
             <label className="check"><input type="checkbox" checked={settings.speak} onChange={(e) => updateSettings({ speak: e.target.checked })} /> {t.speak}</label>
             <label className="check"><input type="checkbox" checked={settings.bodyLanguage} onChange={(e) => updateSettings({ bodyLanguage: e.target.checked })} /> {t.bodyLanguage}</label>
             <label className="check"><input type="checkbox" checked={settings.checkWork} onChange={(e) => updateSettings({ checkWork: e.target.checked })} /> {t.checkWork}</label>
+            <label className="check"><input type="checkbox" checked={settings.filmRuns} onChange={(e) => updateSettings({ filmRuns: e.target.checked })} /> {t.filmRuns}</label>
+            <label className="check" title={robot?.dry ? t.stallDry : ""}>
+              <input type="checkbox" disabled={!robot || robot.dry} checked={!!robot?.stall?.on} onChange={(e) => send({ type: "stall", on: e.target.checked })} /> {t.stallProtect}
+            </label>
           </div>
         </section>
 
@@ -396,6 +406,10 @@ export default function App() {
             {rec && (
               <div className="rec-chip"><i />{t.recording} · {rec.source === "leader" ? t.recLeader : t.recHand} · {rec.seconds.toFixed(1)} s</div>
             )}
+            {robot?.film && <div className="film-chip"><i />REC · {robot.film.seconds.toFixed(0)} s</div>}
+            {robot?.hold?.state && (
+              <div className="hold-chip">✊ {robot.hold.state === "closing" ? t.gripping : `${t.holding} · ${robot.hold.contact_pct}%`}{robot.hold.simulated ? " (sim)" : ""}</div>
+            )}
             {motion && (
               <div className="task-overlay">
                 <div className="task-text">{t.gestures[motion.name] || motion.name}</div>
@@ -416,6 +430,7 @@ export default function App() {
               </span>
             )}
           </div>
+          {test && <TestCard test={test} t={t} send={send} onClose={() => setTest(null)} />}
           {(robot?.taught?.length > 0 || timers.length > 0) && (
             <div className="extras">
               {robot?.taught?.length > 0 && (
@@ -452,6 +467,18 @@ export default function App() {
                 <input type="range" min="10" max="100" step="5" defaultValue={Math.round((robot.guide_level ?? 0.4) * 100)}
                   onChange={(e) => send({ type: "guide", on: true, level: Number(e.target.value) / 100 })} />
               </label>
+            )}
+            {robot?.hold?.state === "holding" && (
+              <button className="ghost on" onClick={() => send({ type: "hold", action: "release" })}>✊ {t.giveBack}</button>
+            )}
+            <button className={`ghost ${robot?.film ? "on" : ""}`} onClick={() => send({ type: "film", on: !robot?.film })}>
+              🎬 {robot?.film ? t.stopFilm : t.film}
+            </button>
+            {!(test && test.phase !== "done") && (
+              <span className="test-start">
+                <input type="number" min="1" max="30" value={trials} onChange={(e) => setTrials(e.target.value)} />
+                <button className="ghost" onClick={() => send({ type: "test", action: "start", trials: Number(trials) || 10 })}>🧪 {t.testStart}</button>
+              </span>
             )}
             <button className="ghost" onClick={() => { player.current?.stop(); send({ type: "hush" }); }}>🤫 {t.hush}</button>
             <button className={`ghost angry-btn ${settings.angry ? "on" : ""}`} title={t.angryHint}
@@ -506,9 +533,19 @@ function Message({ m, t }) {
       </div>
     );
   }
+  if (m.role === "clip") {
+    const src = `/api/clips/${m.name}?token=${encodeURIComponent(TOKEN)}`;
+    return (
+      <div className="msg clip">
+        <video src={src} controls playsInline preload="metadata" />
+        <a className="dl" href={src} download={m.name}>⬇ {t.clip} · {m.label || m.clipKind}{m.seconds != null ? ` · ${m.seconds.toFixed(0)} s` : ""}</a>
+      </div>
+    );
+  }
   if (m.role === "tool") {
     const icon = { do_task: "🦾", stop_robot: "■", go_home: "⌂", look: "👁", robot_status: "ℹ", remember: "🧠", forget: "🗑", gesture: "👋", move_part: "↕", hand_guide: "✋",
-      teach: "🎓", replay: "▶", mirror: "🪞", follow_face: "🙂", dance: "💃", take_photo: "📷", health_check: "🌡", timer: "⏰", run_plan: "📋" }[m.name] || "⚙";
+      teach: "🎓", replay: "▶", mirror: "🪞", follow_face: "🙂", dance: "💃", take_photo: "📷", health_check: "🌡", timer: "⏰", run_plan: "📋",
+      hold: "✊", film: "🎬", test: "🧪" }[m.name] || "⚙";
     const a = m.args || {};
     const r = m.result || {};
     const detail = m.name === "do_task" ? `“${m.args?.instruction}”${m.result?.trained_skill === false ? " · untrained" : ""}`
@@ -522,7 +559,10 @@ function Message({ m, t }) {
       : m.name === "dance" ? `${a.tempo || "medium"}${r.dance_s ? ` · ${r.dance_s} s` : ""}`
       : m.name === "health_check" ? (r.verdict ? `${r.verdict} · ${r.max_temp_c}°C` : "")
       : m.name === "timer" ? (a.action === "set" ? `${a.minutes ? `${a.minutes} min ` : ""}${a.seconds ? `${a.seconds} s ` : ""}“${a.text || ""}”` : a.action)
-      : m.name === "run_plan" ? `${(r.steps || a.steps || []).join(" → ")}${a.repeat > 1 ? ` ×${a.repeat}` : ""}${a.while ? ` · ${a.while}` : ""}` : "";
+      : m.name === "run_plan" ? `${(r.steps || a.steps || []).join(" → ")}${a.repeat > 1 ? ` ×${a.repeat}` : ""}${a.while ? ` · ${a.while}` : ""}`
+      : m.name === "hold" ? `${a.action}${r.width_pct != null ? ` · ${r.width_pct}%` : ""}${r.empty ? " · empty" : ""}`
+      : m.name === "film" ? `${a.action || (a.on ? "start" : "stop")}${r.clip ? ` · ${r.clip}` : ""}`
+      : m.name === "test" ? `${a.action}${a.trials ? ` ${a.trials}` : ""}${a.success != null ? ` · ${a.success ? "✓" : "✗"}` : ""}` : "";
     const err = m.result?.error ? ` · ${m.result.error}` : "";
     return <div className="msg tool">{icon} {m.name} {detail}{err}</div>;
   }
@@ -537,7 +577,54 @@ function Message({ m, t }) {
   }
   if (m.kind === "check") return <div className={`msg event ${m.verdict === "success" ? "ok" : m.verdict === "fail" ? "err" : ""}`}>🔍 {t.verdict[m.verdict] || m.verdict}</div>;
   if (m.kind === "timer_fired") return <div className="msg event ok">⏰ {t.timeUp}: {m.text}</div>;
+  if (m.kind === "stall") {
+    return <div className="msg event err">⛔ {t.stall}: {m.part} · {m.doing || m.while}{m.backed_off_deg ? ` · ${t.backedOff} ${Math.abs(m.backed_off_deg)}°` : ""}</div>;
+  }
+  if (m.kind === "hold_taken") return <div className="msg event">✋ {t.holdTaken}</div>;
   return null;
+}
+
+function TestCard({ test, t, send, onClose }) {
+  const running = test.phase !== "done";
+  const shown = Math.min(test.trial, test.n);
+  return (
+    <div className="test-card">
+      <div className="test-head">
+        <b>🧪 {t.test}</b>
+        <span>{shown}/{test.n}</span>
+        <span className="score">✓ {test.successes}/{test.done}</span>
+        {test.dry && <span className="badge">{t.dry}</span>}
+        <span className="phase">{t.testPhase[test.phase] || test.phase}</span>
+        {!running && <button className="ghost x" onClick={onClose}>✕</button>}
+      </div>
+      <div className="dots">
+        {Array.from({ length: test.n }, (_, i) => {
+          const r = test.results[i];
+          const cls = r ? (r.success ? "ok" : "bad") : running && i + 1 === test.trial ? "cur" : "";
+          return <i key={i} className={cls} title={r ? `${i + 1}: ${r.success ? "✓" : "✗"} · ${t.camGuess}: ${t.guess[r.camera] || r.camera}` : `${i + 1}`} />;
+        })}
+      </div>
+      {test.waiting === "verdict" && (
+        <div className="row">
+          <span className="muted">{t.camGuess}: {t.guess[test.camera] || test.camera}</span>
+          <button className="ok" onClick={() => send({ type: "test", action: "verdict", success: true })}>{t.testWorked}</button>
+          <button className="bad" onClick={() => send({ type: "test", action: "verdict", success: false })}>{t.testFailed}</button>
+        </div>
+      )}
+      {test.waiting === "ready" && (
+        <div className="row"><button className="ok" onClick={() => send({ type: "test", action: "ready" })}>{t.testReady}</button></div>
+      )}
+      {running ? (
+        <div className="row"><button className="ghost" onClick={() => send({ type: "test", action: "stop" })}>■ {t.testStop}</button></div>
+      ) : (
+        <div className="muted small">
+          {test.done ? `${Math.round((100 * test.successes) / test.done)}%` : ""}
+          {test.camera_compared ? ` · ${t.camGuess} ${test.camera_agreed}/${test.camera_compared}` : ""}
+          {test.file ? ` · run/tests/${test.file}` : ""}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function MemoryPanel({ t, version, onClose }) {

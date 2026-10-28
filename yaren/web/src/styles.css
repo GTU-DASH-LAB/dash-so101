@@ -200,3 +200,29 @@ blockquote { margin: 0; padding: 12px 14px; background: var(--panel-2); border-l
 .msg.photo { align-self: center; flex-direction: column; align-items: center; gap: 4px; }
 .msg.photo img { display: block; max-width: 260px; width: 100%; border-radius: 12px; border: 1px solid var(--line); }
 .msg.photo .dl { font-size: 12px; color: var(--muted); text-decoration: none; }
+
+/* ---------------------------------------------------------------- film, third hand, test mode */
+.film-chip, .hold-chip { position: absolute; left: 12px; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; padding: 5px 12px; border-radius: 999px; background: #0b1020cc; }
+.film-chip { top: 44px; border: 1px solid var(--red); color: #ffd0da; }
+.film-chip i { width: 9px; height: 9px; border-radius: 50%; background: var(--red); animation: blink 1s steps(2, start) infinite; }
+.hold-chip { top: 78px; border: 1px solid var(--amber); color: #fde68a; }
+.robot-chip.gripping { background: var(--amber); border-color: var(--amber); color: #0b1020; }
+.test-start { display: inline-flex; align-items: center; gap: 4px; }
+.test-start input { width: 52px; padding: 6px 6px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: inherit; font: inherit; }
+.test-card { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; font-size: 13px; }
+.test-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.test-head .score { font-weight: 700; font-variant-numeric: tabular-nums; }
+.test-head .phase { color: var(--muted); margin-left: auto; }
+.test-head .x { padding: 0 8px; border: 0; }
+.test-card .dots { display: flex; flex-wrap: wrap; gap: 4px; }
+.test-card .dots i { width: 14px; height: 14px; border-radius: 4px; background: #1b2440; border: 1px solid var(--line); }
+.test-card .dots i.ok { background: #16a34a; border-color: #16a34a; }
+.test-card .dots i.bad { background: var(--red); border-color: var(--red); }
+.test-card .dots i.cur { border-color: var(--blue); box-shadow: 0 0 8px var(--blue); }
+.test-card .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.test-card button.ok { background: #16a34a; border-color: #16a34a; color: white; }
+.test-card button.bad { background: var(--red); border-color: var(--red); color: white; }
+.test-card .muted { color: var(--muted); }
+.msg.clip { align-self: center; flex-direction: column; align-items: center; gap: 4px; }
+.msg.clip video { display: block; max-width: 280px; width: 100%; border-radius: 12px; border: 1px solid var(--line); background: #000; }
+.msg.clip .dl { font-size: 12px; color: var(--muted); text-decoration: none; }
