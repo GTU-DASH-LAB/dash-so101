@@ -102,7 +102,9 @@ class Segmenter:
 class Ears:
     def __init__(self, model_dir, device="cuda"):
         from transformers import WhisperForConditionalGeneration, WhisperProcessor
+        from transformers.utils import logging as hf_logging
 
+        hf_logging.set_verbosity_error()   # "Both max_new_tokens and max_length..." on every utterance
         t = time.time()
         self.proc = WhisperProcessor.from_pretrained(model_dir)
         self.model = WhisperForConditionalGeneration.from_pretrained(

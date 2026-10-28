@@ -15,6 +15,17 @@ function getToken() {
 }
 
 const TOKEN = getToken();
+// This tab's id: a reconnect (a phone that slept, a network blip, a reload) gets its conversation back.
+const CID = (() => {
+  try {
+    let c = sessionStorage.getItem("yarenCid");
+    if (!c) {
+      c = Math.random().toString(36).slice(2) + Date.now().toString(36);
+      sessionStorage.setItem("yarenCid", c);
+    }
+    return c;
+  } catch { return ""; }
+})();
 let msgId = 0;
 
 export default function App() {
@@ -64,7 +75,11 @@ export default function App() {
       case "hello":
         setHealth(ev.health); setVoices(ev.health.voices); setLlmReady(ev.health.llm);
         setSettings((s) => ({ ...s, ...ev.settings }));
+        if (ev.resumed && ev.transcript?.length) {
+          setMsgs((ms) => (ms.length ? ms : ev.transcript.map((m) => ({ id: ++msgId, ...m, closed: true }))));
+        }
         break;
+      case "duck": player.current?.duck(ev.on); break;
       case "settings": setSettings((s) => ({ ...s, ...ev.settings })); break;
       case "state": setState(ev.state); break;
       case "vad": setVad(ev.speaking); break;
@@ -114,24 +129,59 @@ export default function App() {
     if (!awake || !TOKEN) return undefined;
     let closed = false;
     let retry = null;
+    let lastMsg = Date.now();
     const connect = () => {
+      if (closed || (ws.current && ws.current.readyState <= 1)) return;
+      clearTimeout(retry);
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const sock = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
+      const sock = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}&cid=${CID}`);
       sock.binaryType = "arraybuffer";
-      sock.onopen = () => { setConnected(true); };
+      sock.onopen = () => { lastMsg = Date.now(); setConnected(true); };
       sock.onclose = () => {
+        if (ws.current !== sock) return;
         setConnected(false);
         player.current?.stop();
         if (!closed) retry = setTimeout(connect, 1500);
       };
       sock.onmessage = (e) => {
+        lastMsg = Date.now();
         if (typeof e.data === "string") onEvent(JSON.parse(e.data));
         else if (audioMeta.current) player.current?.play(new Int16Array(e.data), audioMeta.current.sr);
       };
       ws.current = sock;
     };
+    // The server sends the robot status twice a second: a socket silent for 7 s is dead (a phone that
+    // slept, a Wi-Fi switch) even if the browser has not noticed. Close it, and the retry reconnects.
+    const watchdog = setInterval(() => {
+      if (ws.current?.readyState === 1 && Date.now() - lastMsg > 7000) ws.current.close();
+    }, 2000);
+    // Back from a locked screen or another app: audio contexts are often suspended and the mic track
+    // may have ended. Any tap also resumes them (browsers want a gesture for that).
+    const wakeAudio = async () => {
+      player.current?.resume().catch(() => {});
+      if (mic.current?.dead) {
+        mic.current.stop();
+        try { await mic.current.start(); setMicErr(null); } catch (err) { setMicErr(String(err.message || err)); }
+      } else {
+        mic.current?.resume()?.catch(() => {});
+      }
+    };
+    const onVisible = () => {
+      if (document.hidden) return;
+      wakeAudio();
+      connect();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    document.addEventListener("pointerdown", wakeAudio);
     connect();
-    return () => { closed = true; clearTimeout(retry); ws.current?.close(); };
+    return () => {
+      closed = true;
+      clearTimeout(retry);
+      clearInterval(watchdog);
+      document.removeEventListener("visibilitychange", onVisible);
+      document.removeEventListener("pointerdown", wakeAudio);
+      ws.current?.close();
+    };
   }, [awake, onEvent]);
 
   // Push the current settings whenever they change locally.

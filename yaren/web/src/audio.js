@@ -39,6 +39,16 @@ export class Mic {
     return new MediaRecorder(this.stream, mimeType ? { mimeType } : undefined);
   }
 
+  // A phone that locked its screen can end the track or suspend the context: wake() checks both.
+  get dead() {
+    const t = this.stream?.getAudioTracks()[0];
+    return !t || t.readyState === "ended";
+  }
+
+  resume() {
+    return this.ctx?.state === "running" ? Promise.resolve() : this.ctx?.resume();
+  }
+
   stop() {
     this.stream?.getTracks().forEach((t) => t.stop());
     this.ctx?.close();
@@ -52,13 +62,21 @@ export class Player {
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 512;
     this.analyser.connect(this.ctx.destination);
+    this.gain = this.ctx.createGain(); // ducking: quieter while someone may be talking over her
+    this.gain.connect(this.analyser);
     this.data = new Uint8Array(this.analyser.fftSize);
     this.sources = new Set();
     this.playhead = 0;
   }
 
   resume() {
-    return this.ctx.resume();
+    return this.ctx.state === "running" ? Promise.resolve() : this.ctx.resume();
+  }
+
+  duck(on) {
+    const g = this.gain.gain;
+    g.cancelScheduledValues(this.ctx.currentTime);
+    g.setTargetAtTime(on ? 0.25 : 1, this.ctx.currentTime, 0.05);
   }
 
   play(int16, sampleRate) {
@@ -69,7 +87,7 @@ export class Player {
     for (let i = 0; i < n; i++) ch[i] = int16[i] / 32768;
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
-    src.connect(this.analyser);
+    src.connect(this.gain);
     const start = Math.max(this.ctx.currentTime + 0.03, this.playhead);
     src.start(start);
     this.playhead = start + buf.duration;
@@ -97,6 +115,8 @@ export class Player {
     }
     this.sources.clear();
     this.playhead = 0;
+    this.gain.gain.cancelScheduledValues(this.ctx.currentTime);
+    this.gain.gain.value = 1;
     if (had) this.onPlaying(false);
   }
 

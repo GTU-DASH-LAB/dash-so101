@@ -80,6 +80,7 @@ class Hub:
         self.robot_error = None
         self.llm_ready = False
         self.sessions = set()
+        self.saved = {}            # browser tab id -> Session.snapshot() of a closed connection
 
     async def poll_robot(self):
         while True:
@@ -90,7 +91,8 @@ class Hub:
                 self.robot_status, self.robot_error = None, f"{type(e).__name__}: {e}"
             msg = {"type": "robot", "status": self.robot_status, "error": self.robot_error, "llm": self.llm_ready}
             for s in list(self.sessions):
-                s.out.put_nowait(("json", msg))
+                if s.out.qsize() < 100:    # a stalled socket: don't pile up status it will never need
+                    s.out.put_nowait(("json", msg))
             await asyncio.sleep(0.5)
 
     def log_runs(self, status):
@@ -211,8 +213,11 @@ def make_app(hub, token):
             return
         await websocket.accept()
         out = asyncio.Queue()
-        session = Session(hub, out)
+        cid = (websocket.query_params.get("cid") or "")[:64] or None
+        session = Session(hub, out, cid)
         hub.sessions.add(session)
+        if session.resumed:
+            log.info("tab %s reconnected: conversation of %d messages resumed", cid, len(session.history))
 
         async def writer():
             while True:
@@ -223,7 +228,8 @@ def make_app(hub, token):
                     await websocket.send_bytes(payload)
 
         wtask = asyncio.create_task(writer())
-        session.send(type="hello", health=hub.health(), settings=session.settings)
+        session.send(type="hello", health=hub.health(), settings=session.settings,
+                     resumed=session.resumed, transcript=session.transcript() if session.resumed else [])
         try:
             while True:
                 msg = await websocket.receive()
@@ -261,6 +267,11 @@ def make_app(hub, token):
             hub.sessions.discard(session)
             session.close()
             wtask.cancel()
+            if cid:
+                now = time.time()
+                for k in [k for k, v in hub.saved.items() if now - v["at"] > 3600]:
+                    del hub.saved[k]
+                hub.saved[cid] = session.snapshot()
 
     if dist.exists():
         app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")

@@ -21,6 +21,8 @@ import numpy as np
 import torch
 
 log = logging.getLogger("yaren.voice")
+# "forcing EOS token" on most sentences: trim_tail handles those tails, the log only drowned in them
+logging.getLogger("chatterbox.models.t3.inference.alignment_stream_analyzer").setLevel(logging.ERROR)
 
 TR_CHARS = set("çğıöşüÇĞİÖŞÜ")
 TR_WORDS = {"ve", "bir", "bu", "ama", "evet", "hayır", "tamam", "kanki", "şimdi", "için", "ben", "sen",

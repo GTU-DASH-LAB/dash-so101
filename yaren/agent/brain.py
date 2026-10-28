@@ -11,6 +11,7 @@ the LLM; a running task is watched, and Yaren says how it ended.
 
 import asyncio
 import base64
+import collections
 import json
 import logging
 import os
@@ -73,6 +74,8 @@ TURN_LOG = os.environ.get("YAREN_TURN_LOG")  # debugging: append every LLM reque
 
 TRAINED_TASK = "Pick up the pen and put it in the bowl"
 STOP_WORDS = {"dur", "durdur", "dursun", "durun", "bekle", "yeter", "stop", "halt", "freeze", "wait"}
+RESUME_S = 1800                    # a browser that reconnects within this long gets its conversation back
+ECHO_WINDOW_S = 30                 # what she said this recently can come back through the microphone
 SENT_END = re.compile(r"[.!?…]+[\"')\]]*\s+")   # needs the following space: "3." may still become "3.5"
 ABBREV = {"dr", "prof", "mr", "mrs", "ms", "st", "vb", "örn", "sn", "no"}
 
@@ -229,10 +232,31 @@ def is_stop_command(text):
     return bool(words) and len(words) <= 5 and any(w in STOP_WORDS for w in words)
 
 
+def _words(text):
+    return re.findall(r"[^\W_]+", text.lower().replace("i̇", "i").replace("ı", "i"))
+
+
+def is_echo(text, recent):
+    """True when (nearly) every word heard is a word she said in `recent`: her own voice coming back
+    through the phone's microphone. On 2026-10-28 that set off 109 barge-ins in 8 minutes - she cut
+    herself off every ~4 s and answered her own sentences. Whisper transcribes the echo well enough
+    for this; 5-letter prefixes absorb Turkish suffixes ("kalemi" / "kalem")."""
+    said = set()
+    for t in recent:
+        for w in _words(t):
+            said.update((w, w[:5]))
+    heard = _words(text)
+    if not heard or not said:
+        return False
+    novel = [w for w in heard if w not in said and w[:5] not in said]
+    return len(novel) <= len(heard) // 4
+
+
 class Session:
-    def __init__(self, hub, out):
+    def __init__(self, hub, out, cid=None):
         self.hub = hub
         self.out = out                    # asyncio.Queue of ("json", dict) / ("bytes", bytes)
+        self.cid = cid                    # the browser tab's id: a reconnect gets the conversation back
         self.history = []
         self.settings = {"lang": "auto", "voice": hub.cfg["default_voice"], "bargeIn": True,
                          "handsFree": True, "speak": True}
@@ -246,16 +270,41 @@ class Session:
         self.pending_tts = 0
         self.client_playing = False
         self.play_until = 0.0        # when the audio already sent should have finished playing
+        self.heard = collections.deque(maxlen=16)   # (monotonic time, sentence) of what she said aloud
+        self.utt_busy = False        # the utterance being segmented began while she was talking
+        self.ducked = False
         self.state = None
         # The memory is read once per conversation (Hermes Agent's "frozen snapshot"): what is written
         # during it is on disk at once but shows up in the prompt next time, so the prefix stays cached.
         dry = bool((hub.robot_status or {}).get("dry"))
         self.system = PERSONA + "\n\n" + hub.memory.snapshot(dry)
+        self.resumed = False
+        saved = hub.saved.pop(cid, None) if cid else None
+        if saved and time.time() - saved["at"] < RESUME_S:
+            self.history, self.lang, self.system = saved["history"], saved["lang"], saved["system"]
+            self.settings.update(saved["settings"])
+            self.resumed = True
         # No per-conversation warm-up: with qwen3.8 on Ollama 0.40.9 only a request that extends the
         # previous one reuses the cache, so a warm-up request saved nothing (1,666 tokens: 390-440 ms
         # prefill with or without it; follow-up turns of a conversation: ~155 ms).
         self.tasks = [asyncio.create_task(self._speaker())]
         self._set_state("idle")
+
+    def snapshot(self):
+        """What a reconnect of the same browser tab picks up again (see RESUME_S)."""
+        return {"at": time.time(), "history": self.history, "lang": self.lang, "system": self.system,
+                "settings": dict(self.settings)}
+
+    def transcript(self, n=40):
+        """The conversation as the chat shows it, for a page that reloaded."""
+        out = []
+        for m in self.history:
+            c = m.get("content") or ""
+            if m["role"] == "user" and not c.startswith("[") and not m.get("images"):
+                out.append({"role": "user", "text": c.rsplit("\n(reply in", 1)[0]})
+            elif m["role"] == "assistant" and c.strip():
+                out.append({"role": "assistant", "text": c})
+        return out[-n:]
 
     # ---------------------------------------------------------------- plumbing
     def send(self, **ev):
@@ -287,16 +336,27 @@ class Session:
             return  # half-duplex: do not listen to our own voice coming out of a speaker
         for ev in self.seg.feed(pcm, forced=self.ptt):
             if ev[0] == "start":
+                # Barge-in waits for the words. Interrupting at the first 64 ms of "speech" let her own
+                # voice from the speaker cut her off (109 times in 8 minutes on 2026-10-28). Meanwhile
+                # she gets quieter, which also starves that echo.
                 self.send(type="vad", speaking=True)
-                if self.busy() and self.settings["bargeIn"]:
-                    await self.interrupt("barge-in")
-                self._set_state("listening")
+                self.utt_busy = self.busy()
+                if self.utt_busy:
+                    self._duck(True)
+                else:
+                    self._set_state("listening")
             elif ev[0] == "drop":
                 self.send(type="vad", speaking=False)
+                self._duck(False)
                 self._settle()
             else:
                 self.send(type="vad", speaking=False)
-                asyncio.create_task(self.on_utterance(ev[1]))
+                asyncio.create_task(self.on_utterance(ev[1], self.utt_busy))
+
+    def _duck(self, on):
+        if on != self.ducked:
+            self.ducked = on
+            self.send(type="duck", on=on)
 
     async def on_ptt(self, down):
         if down:
@@ -312,16 +372,29 @@ class Session:
                     asyncio.create_task(self.on_utterance(ev[1]))
             self._settle()
 
-    async def on_utterance(self, audio):
-        self._set_state("thinking")
+    async def on_utterance(self, audio, while_busy=False):
+        if not while_busy:
+            self._set_state("thinking")
         lang = self.settings["lang"]
         res = await asyncio.get_running_loop().run_in_executor(self.hub.asr_pool, self.hub.ears.transcribe, audio, lang)
-        if not res["text"]:
+        text, secs = res["text"], round(len(audio) / 16000, 2)
+        if not text:
             self.send(type="asr_empty", raw=res["raw"])
+            self._duck(False)
             self._settle()
             return
-        self.send(type="user", text=res["text"], lang=res["lang"], asr_ms=res["ms"], audio_s=round(len(audio) / 16000, 2))
-        await self.on_user_text(res["text"], res["lang"])
+        if while_busy:
+            now = time.monotonic()
+            if not is_stop_command(text) and is_echo(text, [s for t, s in self.heard if now - t < ECHO_WINDOW_S]):
+                log.info("ignored her own echo (%.1f s): %r", secs, text[:120])
+                self.send(type="echo", text=text)
+                self._duck(False)
+                self._settle()
+                return
+        log.info("heard (%s, %.1f s, asr %d ms%s): %r", res["lang"], secs, res["ms"],
+                 ", while she talked" if while_busy else "", text[:200])
+        self.send(type="user", text=text, lang=res["lang"], asr_ms=res["ms"], audio_s=secs)
+        await self.on_user_text(text, res["lang"])
 
     async def on_user_text(self, text, lang=None):
         if self.settings["lang"] in ("tr", "en"):
@@ -362,12 +435,13 @@ class Session:
             self.pending_tts -= 1
         self.client_playing = False
         self.play_until = 0.0
+        self.ducked = False
         self.send(type="audio_stop")
 
     def body_note(self, text):
-        """Something the LLM must know about the arm that did not come from its own tool calls."""
+        """Something the LLM must know about the arm that did not come from its own tool calls. No
+        "(noted)" assistant reply after it any more: placeholder replies get imitated."""
         self.history.append({"role": "user", "content": f"[Robot body event] {text}"})
-        self.history.append({"role": "assistant", "content": "(noted)"})
 
     async def stop_button(self):
         await self.interrupt("stop button")
@@ -425,6 +499,7 @@ class Session:
                     continue
                 seq += 1
                 pcm = (audio.clip(-1, 1) * 32767).astype("<i2").tobytes()
+                self.heard.append((time.monotonic(), text))
                 self.client_playing = True
                 self.play_until = max(self.play_until, time.monotonic()) + len(audio) / self.hub.voice.sr
                 self.send(type="audio", seq=seq, sr=self.hub.voice.sr, text=text, lang=lang, gen=gen,
@@ -457,12 +532,12 @@ class Session:
     async def respond(self, msg):
         self.history.append(msg)
         self._set_state("thinking")
-        my_gen = self.gen
         t0 = time.perf_counter()
         first = None
         user_turn = msg.get("role") == "user" and not str(msg.get("content", "")).startswith("[Robot body event]")
         used, said, nudged, mute, quiet = set(), "", False, False, False
         tools = TOOLS
+        content, open_calls = "", []     # what a cut-off turn still has to put in the history
         try:
             for _ in range(4):
                 content, calls, buf, stats = "", [], "", None
@@ -500,6 +575,7 @@ class Session:
                     entry["tool_calls"] = calls
                     used |= {c.get("function", {}).get("name") for c in calls}
                 self.history.append(entry)
+                content, open_calls = "", list(calls)
                 if not calls:
                     nudge = None
                     if user_turn and not nudged:
@@ -526,20 +602,34 @@ class Session:
                         except json.JSONDecodeError:
                             args = {}
                     result, image = await self.run_tool(name, args)
+                    open_calls.pop(0)
+                    log.info("tool %s %s -> %s", name, json.dumps(args, ensure_ascii=False)[:160],
+                             json.dumps(result, ensure_ascii=False)[:240])
                     self.send(type="tool", name=name, args=args, result=result)
                     self.history.append({"role": "tool", "tool_name": name, "content": json.dumps(result, ensure_ascii=False)})
                     if image:
                         self.history.append({"role": "user", "images": [image], "content":
                                              "[Robot body event] The wrist camera image you asked for (look)."})
         except asyncio.CancelledError:
-            if my_gen != self.gen and self.history and self.history[-1]["role"] == "user":
-                self.history.append({"role": "assistant", "content": "(interrupted)"})
+            # Cut off (barge-in, a new request, a closed tab). The history keeps what she really
+            # produced, never a placeholder: a run of "(interrupted)" replies got imitated.
+            if content.strip():
+                self.history.append({"role": "assistant", "content": content.strip() + " …"})
+            for call in open_calls:     # every tool call gets an answer, as the chat template expects
+                self.history.append({"role": "tool", "tool_name": call.get("function", {}).get("name"),
+                                     "content": json.dumps({"interrupted": True, "note": "cut off before the "
+                                                            "result came back; it may have started - check "
+                                                            "robot_status"})})
+            log.info("turn cut off after %.1f s", time.perf_counter() - t0)
             raise
         except Exception as e:  # noqa: BLE001
             log.exception("turn failed")
             self.send(type="error", message=f"LLM: {e}")
             self.say("Bir şey ters gitti, tekrar söyler misin?" if self.lang == "tr" else "Something went wrong, can you say that again?")
         finally:
+            if said.strip():
+                log.info("said (first sentence after %s ms): %r", None if first is None else round(first * 1000),
+                         said.strip()[:240])
             self._settle()
 
     async def asked_for_action(self, content):
