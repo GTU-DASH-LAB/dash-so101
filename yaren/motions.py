@@ -663,6 +663,9 @@ GRIP_SQUEEZE = 6.6
 GRIP_CONTACT = 2.0                # % short of the goal for a whole window, while still: touching something
 GRIP_GONE = 2.0                   # % from the goal for a whole window while holding: nothing in the hand
 GRIP_MIN_OPEN = 10.0              # grip refuses to start more closed than this: nothing can be put in
+GRIP_EMPTY_POS = 3.0              # stopped below this: closed, not holding - the demonstrations' empty gripper
+                                  # rests at 1.2-1.4 % (medians of the 100 episodes' first / last second)
+GRIP_OPEN = LIMITS["gripper"][1]  # "open" to take something: as wide as in the demonstrations
 
 
 class Grip:
@@ -681,12 +684,12 @@ class Grip:
         still = full and abs(self.hist[-1][1] - self.hist[0][1]) < STALL_STILL_DEG
         lo = LIMITS["gripper"][0]
         if self.state == "closing":
-            if still and all(p - g > GRIP_CONTACT for g, p in self.hist):
+            if still and pos > GRIP_EMPTY_POS and all(p - g > GRIP_CONTACT for g, p in self.hist):
                 self.state, self.contact = "holding", float(pos)
                 self.goal = max(lo, float(pos) - GRIP_SQUEEZE)
                 self.hist.clear()
                 return self.goal, "contact"
-            if self.goal <= lo and still and pos - self.goal <= GRIP_CONTACT:
+            if self.goal <= lo and still and (pos - self.goal <= GRIP_CONTACT or pos <= GRIP_EMPTY_POS):
                 self.state = "empty"
                 return self.goal, "empty"
             self.goal = max(lo, self.goal - GRIP_SPEED * self.dt)

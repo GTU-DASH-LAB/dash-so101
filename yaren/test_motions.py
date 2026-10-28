@@ -379,6 +379,13 @@ def test_grip():
         events.append(ev)
         pos = servo(pos, goal, v)
     assert events.count("empty") == 1 and "contact" not in events and g.state == "empty"
+    # a gripper whose fingers meet a little above its goal (calibration): still empty, not "holding"
+    g, pos, events = M.Grip(45.0), 45.0, []
+    for _ in range(120):
+        goal, ev = g.step(pos)
+        events.append(ev)
+        pos = servo(pos, goal, v, obstacle=2.8)
+    assert "empty" in events and "contact" not in events
 
 
 if __name__ == "__main__":

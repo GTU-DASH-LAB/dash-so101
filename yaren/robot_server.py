@@ -31,15 +31,24 @@ API (127.0.0.1 only - the voice server is the only client):
   POST /pose {name}              go to a named pose (motions.POSES: survey, portrait) and stay
   POST /dance {bpm, beats, plan_only}  a dance on the beat (motions.plan_dance); plan_only: just the timing
   POST /express {kind}           a small body-language move (motions.EXPRESSIONS), only when idle and up
+  POST /hold {action}            third hand: open (to take something), grip (close until it touches, then hold
+                                 like the demonstrations held the pen), release (open: give it back)
+  POST /film {action, max_seconds}   start / stop filming the camera into run/film/*.mp4 (stop: the file)
+  POST /stall {on, test}         stall protection on / off; test (--dry only): act as if that joint stalled
   GET  /camera/<name>.jpg|.mjpg  latest camera frame / MJPEG stream (?upright=1: turned so a face is upright)
 
 --dry: no arm, no camera. The robot is replaced by a stand-in that replays a recorded episode of
 so101_pen_in_bowl_wrist and swallows actions, so the policy, the API and the UI can be tested
 without moving anything. The leader arm is replaced by that episode's actions (what the leader did).
+The gripper is simulated while it grips or holds (an imaginary object DRY_OBJECT_PCT wide; /hold take
+pulls it out), and stall protection is off: replayed positions never follow the commands.
 
 A task always starts from the start pose: requested anywhere else, the arm goes home first (MolmoAct2
 only ever started from there). Motor temperatures are read once a second: new moves are refused, and a
 run is stopped and sent home, before a motor gets near the limit the servo itself would cut torque at.
+Stall protection (motions.StallWatch) watches every driven tick: a joint that stops short of its goal by
+more than the demonstrations ever did ends whatever drove it - run, motion, homing, mirroring, following -
+backs off a little and holds there. It never goes home after a stall: something, or someone, is in the way.
 """
 
 import asyncio
@@ -47,6 +56,8 @@ import collections
 import concurrent.futures
 import json
 import logging
+import queue
+import subprocess
 import sys
 import threading
 import time
@@ -84,6 +95,10 @@ MIRROR_ALIGNED_DEG = 3.0      # mirroring starts calmly (GENTLE) until the arm i
 FOLLOW_MAX_S = 300.0          # face following ends by itself after 5 minutes,
 FOLLOW_LOST_S = 30.0          # or after this long without seeing a face
 FACE_EVERY = 3                # face detection every 3rd tick (10 Hz)
+DRIVEN = ("running", "homing", "moving", "mirroring", "following")   # states the stall watch looks at
+GRIP_MAX_S = 6.0              # closing from wide open takes ~1 s (GRIP_SPEED); give up after this
+DRY_OBJECT_PCT = 20.0         # --dry: how wide the imaginary object in the gripper is
+FILM_MAX_S = 300.0            # a clip nobody stops ends by itself after 5 minutes
 
 
 def pop_opt(name, default=None, flag=False):
@@ -189,6 +204,71 @@ def slug(name):
     return out[:40]
 
 
+class Film:
+    """The camera frames the control loop sees, as an H.264 MP4 at a steady frame rate: a frame is repeated
+    or skipped to keep wall-clock time, so a soundtrack recorded alongside stays in sync. ffmpeg is fed from
+    its own thread: a slow disk never delays a tick (a full queue drops a frame instead)."""
+
+    def __init__(self, path, size, fps, max_s):
+        self.path, self.fps, self.max_s = Path(path), fps, max_s
+        w, h = size
+        self.proc = subprocess.Popen(
+            ["ffmpeg", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
+             "-r", str(fps), "-i", "-", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(self.path)],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.q = queue.Queue(maxsize=int(fps * 3))
+        self.t0 = None                 # wall-clock time of the first frame
+        self.written = 0
+        self.dropped = 0
+        self.th = threading.Thread(target=self._writer, name="film", daemon=True)
+        self.th.start()
+
+    @property
+    def seconds(self):
+        return self.written / self.fps
+
+    def add(self, rgb, now):
+        if self.t0 is None:
+            self.t0 = now
+        for _ in range(int((now - self.t0) * self.fps) + 1 - self.written):   # frames owed to the clock
+            try:
+                self.q.put_nowait(rgb)
+                self.written += 1
+            except queue.Full:
+                self.dropped += 1
+                break
+
+    def _writer(self):
+        while True:
+            f = self.q.get()
+            if f is None:
+                break
+            try:
+                self.proc.stdin.write(f.tobytes())
+            except (BrokenPipeError, ValueError, OSError):
+                break
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+
+    def close(self, timeout=30.0):
+        self.q.put(None)
+        self.th.join(timeout)
+        try:
+            self.proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+        err = self.proc.stderr.read().decode(errors="replace").strip()[-400:] if self.proc.stderr else ""
+        ok = self.proc.returncode == 0 and self.path.exists() and self.written > 0
+        log.info("film %s: %.1f s, %d frames (%d dropped)%s", self.path.name, self.seconds, self.written,
+                 self.dropped, "" if ok else f" FAILED: {err}")
+        return {"file": str(self.path), "ok": ok, "t0": self.t0, "seconds": round(self.seconds, 2),
+                "frames": self.written, "dropped": self.dropped, **({} if ok else {"error": err or "no frames"})}
+
+
 class Body:
     """Owns the robot. One control thread does every robot call; the API only sets requests."""
 
@@ -210,13 +290,14 @@ class Body:
         self.cams = [k for k, v in self.robot.observation_features.items() if isinstance(v, tuple)]
         self.lock = threading.Lock()
         self.state = "idle"            # idle | running | homing | moving (a planned motion) | guiding |
-                                       # mirroring | following
+                                       # mirroring | following | gripping (closing on something)
         self.request = None            # ("task", text, max_s) | ("stop", home, reason) | ("home",) |
                                        # ("gesture", name, future) | ("move", part, direction, degrees, future)
                                        # | ("guide", on, level, future) | ("teach", action, source, name, future)
                                        # | ("replay", name, speed, future) | ("mirror", on, future) |
                                        # ("follow", on, future) | ("pose", name, gentle, future) |
                                        # ("dance", bpm, beats, plan_only, future) | ("express", kind, future)
+                                       # | ("hold", action, future) | ("stall_test", joint, future)
         self.task = None
         self.task_started = 0.0
         self.task_max_s = task_timeout
@@ -254,8 +335,40 @@ class Body:
         self.health = None             # motor temperatures / voltages, once a second
         self.temp_limit = None
         self.health_note = None        # the last warning, for the voice side
+        self.stall_on = True
+        self._stall = motions.StallWatch()
+        self.last_goal = {}            # per joint, the goal the servos were sent last (after lerobot's clamp)
+        self.last_stall = None         # {joint, error_deg, limit_deg, while, doing, backed_off_deg, at}
+        self._backoff = False          # the running motion is the back-off after a stall
+        self._grip = None              # motions.Grip: closing on something, then watching what it holds
+        self._grip_t0 = 0.0
+        self._hold = None              # {goal, contact}: the gripper holds something; its goal wins over every command
+        self.hold_event = None         # {event: contact | empty | taken | released | gave_up, at}
+        self._sim_grip = None          # --dry: simulated gripper position (only once /hold was used)
+        self._dry_object = False       # --dry: the imaginary object is in the hand
+        self._film = None              # Film while filming the camera
+        self.last_film = None          # a clip that ended by itself (FILM_MAX_S), until /film stop collects it
+        self.films_dir = HERE / "run" / "film"
+        self._wrap_send()
         self.engine.reset()
         self.engine.start()
+
+    def _wrap_send(self):
+        """Every command to the servos passes here - lerobot's send_next_action too: the gripper keeps
+        holding what it holds, and the goal really sent (after max_relative_target) is kept for the stall
+        watch."""
+        send = self.robot.send_action
+
+        def send_action(action):
+            hold = self._hold
+            if hold is not None and "gripper.pos" in action:
+                action = {**action, "gripper.pos": hold["goal"]}
+            sent = send(action)
+            self.last_goal.update({k.removesuffix(".pos"): float(v)
+                                   for k, v in (sent if isinstance(sent, dict) else action).items()})
+            return sent
+
+        self.robot.send_action = send_action
 
     # ---- requests (API threads) ----
     def submit(self, req):
@@ -296,6 +409,9 @@ class Body:
                 "taught": self.taught(), "leader": self.leader is not None,
                 "face": None if self._face is None else {k: self._face.get(k) for k in ("seen", "ex", "ey", "rot")},
                 "health": self.health_summary(), **self._where(),
+                "stall": {"on": self.stall_on and not self.dry, "last": self.last_stall,
+                          "limits_deg": motions.STALL_DEG},
+                "hold": self._hold_info(), "film": self._film_info(),
                 "runs": self.runs, "joints": {k: round(v, 1) for k, v in self.joints.items()},
                 "tick_ms_p50": round(float(np.percentile(tick, 50)), 2),
                 "tick_ms_max": round(float(tick.max()), 1),
@@ -318,6 +434,18 @@ class Body:
             return None
         plan, t0 = self._motion
         return {**plan.summary, "elapsed_s": round(time.perf_counter() - t0, 1)}
+
+    def _hold_info(self):
+        g, h = self._grip, self._hold
+        if g is None and h is None and self.hold_event is None:
+            return None
+        return {"state": "closing" if g is not None and g.state == "closing" else "holding" if h else None,
+                "contact_pct": round(h["contact"], 1) if h else None, "goal_pct": round(h["goal"], 1) if h else None,
+                "event": self.hold_event, "simulated": self.dry}
+
+    def _film_info(self):
+        f = self._film
+        return None if f is None else {"file": f.path.name, "seconds": round(f.seconds, 1), "dropped": f.dropped}
 
     @staticmethod
     def _rec_seconds(rec):
@@ -385,6 +513,7 @@ class Body:
                             "at": time.time()}
         log.info("motion %r ended (%s) after %.1f s", plan.name, how, self.last_motion["seconds"])
         self._motion = None
+        self._backoff = False
         self.state = "idle"
         if how == "done" and then == "follow":
             self._start_follow()
@@ -441,13 +570,17 @@ class Body:
 
     # ---- modes: hand-guiding, mirroring, face following; teaching records the first two ----
     def _end_modes(self, joints):
-        """End guiding / mirroring / following: the arm holds where it is."""
+        """End guiding / mirroring / following / closing the gripper: the arm holds where it is."""
         if self.state == "guiding":
             self._set_guide(False, joints)
         elif self.state == "mirroring":
             self._stop_mirror(joints)
         elif self.state == "following":
             self._stop_follow("stopped")
+        elif self.state == "gripping":
+            self._grip = None
+            self.hold_event = {"event": "gave_up", "at": time.time()}
+            self.state = "idle"
 
     def _end_recording(self):
         rec, self._rec = self._rec, None
@@ -801,6 +934,21 @@ class Body:
         if kind in ("gesture", "move", "pose", "dance", "express", "replay"):
             self._start_motion(req, joints)
             return
+        if kind == "hold":
+            self._hold_request(req, joints)
+            return
+        if kind == "stall_test":       # --dry: the whole reaction, as if this joint had stalled
+            joint, fut = req[1], req[2]
+            if joint not in motions.STALL_DEG:
+                fut.set_result({"error": f"joints: {', '.join(motions.STALL_DEG)}"})
+                return
+            self._on_stall((joint, round(1.5 * motions.STALL_DEG[joint], 1)), joints)
+            fut.set_result({"simulated": True, "stall": self.last_stall})
+            return
+        if kind == "task" and self._hold is not None:
+            req[-1].set_result({"error": "I am holding something for you: take it (or tell me to give it back) "
+                                         "before I start a task"})
+            return
         # task / stop / home end every mode; the arm holds where it is first
         self._end_modes(joints)
         if self.state == "moving":
@@ -834,6 +982,189 @@ class Body:
                 self._finish("stopped")
             self._start_home(joints)
 
+    # ---- stall protection ----
+    def _on_stall(self, hit, joints):
+        joint, err = hit
+        was = self.state
+        doing = self.task if was == "running" else self._motion[0].name if was == "moving" and self._motion else was
+        load = None
+        if self.bus is not None:
+            try:
+                load = self.bus.sync_read("Present_Load", normalize=False)   # for the log: tuning data
+            except Exception:  # noqa: BLE001
+                pass
+        log.warning("STALL: %s stopped %+.1f deg short of its goal (limit %.1f) while %s (%s); load %s",
+                    joint, err, motions.STALL_DEG[joint], was, doing, load)
+        again = was == "moving" and self._backoff     # blocked while backing off: just hold
+        if was == "running":
+            self._finish("blocked")
+        elif was == "moving":
+            self._end_motion("blocked")
+        elif was == "homing":
+            self.state = "idle"
+        else:
+            self._end_modes(joints)
+        self._pending_task, self._then = None, None
+        pose = motions.from_obs(joints)
+        back = None if again else motions.plan_backoff(pose, joint, err)
+        if back is None:
+            self.robot.send_action(motions.to_action(pose))      # stop pushing: hold right here
+        else:
+            self._motion = (back, time.perf_counter())
+            self._backoff = True
+            self.state = "moving"
+        self._stall.reset()
+        self.last_stall = {"joint": joint, "error_deg": round(err, 1), "limit_deg": motions.STALL_DEG[joint],
+                           "while": was, "doing": doing, "backed_off_deg": back.summary["moved"] if back else 0.0,
+                           "at": time.time()}
+
+    # ---- third hand ----
+    def _gripper_pos(self, joints):
+        return self._sim_grip if self._sim_grip is not None else joints.get("gripper.pos", 0.0)
+
+    def _sim_tick(self, joints):
+        """--dry: the gripper moves toward its last goal like a servo, and stops at the imaginary object."""
+        if self._sim_grip is None:
+            return
+        v = motions.LIVELY["gripper"] / self.fps
+        goal = self.last_goal.get("gripper", self._sim_grip)
+        g = self._sim_grip + max(-v, min(v, goal - self._sim_grip))
+        self._sim_grip = max(g, DRY_OBJECT_PCT) if self._dry_object else g
+        joints["gripper.pos"] = self._sim_grip
+
+    def _hold_request(self, req, joints):
+        _, action, fut = req
+        try:
+            if action in ("open", "grip") and self.state == "running":
+                raise motions.Refused(f"a task run is in progress ('{self.task}'); stop it first")
+            if action in ("open", "grip"):
+                hot = self._too_hot()
+                if hot:
+                    raise motions.Refused(hot)
+            if self.dry and self._sim_grip is None:
+                self._sim_grip = float(joints.get("gripper.pos", 0.0))
+                joints["gripper.pos"] = self._sim_grip
+            if action == "open":
+                if self._hold:
+                    raise motions.Refused("I am holding something: release gives it back (they should hold it first)")
+                inner = concurrent.futures.Future()
+                self._start_motion(("move", "gripper", "open", None, inner), joints)
+                res = inner.result()
+                if "already as far open" in str(res.get("error", "")):
+                    res = {"open": True, "already": True}
+                elif res.get("started"):
+                    res = {"opening": True, "seconds": res.get("seconds"), "to_pct": motions.GRIP_OPEN}
+            elif action == "grip":
+                if self._hold:
+                    res = {"holding": True, "already": True, "contact_pct": round(self._hold["contact"], 1)}
+                else:
+                    g = self._gripper_pos(joints)
+                    if g < motions.GRIP_MIN_OPEN:
+                        raise motions.Refused(f"my hand is closed ({g:.0f} % open): open it first, let them put "
+                                              "the thing in, then grip")
+                    if self.state == "moving":
+                        self._end_motion("replaced")
+                    self._end_modes(joints)
+                    self._pending_task = None
+                    self._grip = motions.Grip(g, 1.0 / self.fps)
+                    self._grip_t0 = time.perf_counter()
+                    self._dry_object = self.dry
+                    self.hold_event = None
+                    self.state = "gripping"
+                    res = {"gripping": True, "from_pct": round(g, 1)}
+            elif action == "release":
+                had = self._hold is not None or self._grip is not None
+                if self.state == "gripping":
+                    self.state = "idle"
+                self._grip, self._hold, self._dry_object = None, None, False
+                if had:
+                    self.hold_event = {"event": "released", "at": time.time()}
+                inner = concurrent.futures.Future()
+                self._start_motion(("move", "gripper", "open", None, inner), joints)
+                r = inner.result()
+                res = {"released": had, "opening": bool(r.get("started")),
+                       **({"note": "nothing was held; the hand is open"} if not had else {})}
+            elif action == "take" and self.dry:
+                self._dry_object = False
+                res = {"simulated": "the imaginary object was pulled out"}
+            else:
+                raise motions.Refused(f"unknown hold action '{action}'")
+        except motions.Refused as e:
+            res = {"error": str(e)}
+        except Exception as e:  # noqa: BLE001 - never leave the request unanswered
+            log.exception("hold %s failed", action)
+            res = {"error": f"{type(e).__name__}: {e}"}
+        fut.set_result(res)
+
+    def _grip_tick(self, joints):
+        """Closing on something (state gripping), or watching what is held: was it taken out?"""
+        g = self._grip
+        if g is None:
+            return
+        goal, ev = g.step(self._gripper_pos(joints))
+        if g.state == "closing" or ev in ("contact", "empty"):
+            self.robot.send_action({"gripper.pos": goal})
+        now = time.time()
+        if ev == "contact":
+            self._hold = {"goal": goal, "contact": g.contact}
+            self.hold_event = {"event": "contact", "contact_pct": round(g.contact, 1), "at": now}
+            self.state = "idle"
+            log.info("gripping something %.1f %% wide: holding with the goal at %.1f %%", g.contact, goal)
+        elif ev == "empty":
+            self._grip = None
+            self.hold_event = {"event": "empty", "at": now}
+            self.state = "idle"
+            log.info("gripper closed all the way: nothing in the hand")
+        elif ev == "gone":
+            self._grip, self._hold = None, None
+            self.hold_event = {"event": "taken", "at": now}
+            log.info("what the gripper held was taken out")
+        elif g.state == "closing" and time.perf_counter() - self._grip_t0 > GRIP_MAX_S:
+            self._grip = None
+            self.hold_event = {"event": "gave_up", "at": now}
+            self.state = "idle"
+            log.warning("gripping gave up after %.0f s", GRIP_MAX_S)
+
+    # ---- film ----
+    def film(self, action, max_s=None):
+        """Start or stop filming (API thread: ffmpeg never runs in the control thread)."""
+        with self.lock:
+            if action == "start":
+                if self._film is not None:
+                    return {"filming": True, "already": True, "file": self._film.path.name}
+                if not self.cams:
+                    return {"error": "no camera"}
+                h, w = self.robot.observation_features[self.cams[0]][:2]
+                self.films_dir.mkdir(parents=True, exist_ok=True)
+                stamp, k = time.strftime("%Y%m%d-%H%M%S"), 1
+                path = self.films_dir / f"{stamp}.mp4"
+                while path.exists():
+                    k += 1
+                    path = self.films_dir / f"{stamp}-{k}.mp4"
+                self._film = Film(path, (w, h), self.fps, min(FILM_MAX_S, float(max_s or FILM_MAX_S)))
+                self.last_film = None
+                log.info("filming %s into %s", self.cams[0], path.name)
+                return {"filming": True, "file": path.name, "max_seconds": self._film.max_s}
+            film, self._film = self._film, None
+            if film is None:
+                done, self.last_film = self.last_film, None
+                return done or {"filming": False, "error": "nothing was being filmed"}
+        return film.close()
+
+    def _film_tick(self, obs):
+        film = self._film
+        if film is None or not self.cams or self.cams[0] not in obs:
+            return
+        film.add(np.ascontiguousarray(obs[self.cams[0]]).copy(), time.time())
+        if film.seconds >= film.max_s:
+            self._film = None
+            log.info("film reached %.0f s: stopped", film.max_s)
+
+            def close():
+                self.last_film = {**film.close(), "ended": "time limit"}
+
+            threading.Thread(target=close, name="film-close", daemon=True).start()
+
     def warmup(self):
         """Predict one chunk on the live observation and throw it away (nothing is sent), so the
         first real run does not pay the ~300 ms first-call cost at its first tick."""
@@ -860,9 +1191,18 @@ class Body:
                 obs = self.robot.get_observation()
                 joints = {k: float(v) for k, v in obs.items() if k.endswith(".pos")}
                 with self.lock:
+                    self._sim_tick(joints)
                     req, self.request = self.request, None
                     if req:
                         self._apply_request(req, joints)
+                    if self.stall_on and not self.dry and self.state in DRIVEN and self.last_goal:
+                        hit = self._stall.step(self.last_goal, motions.from_obs(joints))
+                        if hit:
+                            self._on_stall(hit, joints)
+                    else:
+                        self._stall.reset()
+                    if self._grip is not None:
+                        self._grip_tick(joints)
                     state = self.state
                 if state == "running":
                     if time.time() - self.task_started >= self.task_max_s:
@@ -939,6 +1279,7 @@ class Body:
                 with self.lock:
                     self.joints = joints
                     self.frames.update(frames)
+                self._film_tick(obs)
             except Exception as e:  # noqa: BLE001 - keep the arm loop alive, stop the run
                 log.exception("control loop error")
                 with self.lock:
@@ -955,6 +1296,8 @@ class Body:
                             log.exception("could not restore torque limits (they come back at power-off)")
                     self._end_recording()
                     self._follow, self._face, self._pending_task, self._then = None, None, None, None
+                    if self._grip is not None and self._grip.state == "closing":
+                        self._grip = None    # what is already held stays held (self._hold)
                     self.state = "idle"     # a failed homing, gesture, guiding, mirroring...: hold, report, wait
                 time.sleep(0.2)
             dt = time.perf_counter() - t0
@@ -970,6 +1313,9 @@ class Body:
 
         self.alive = False
         time.sleep(0.2)
+        if self._film is not None:
+            film, self._film = self._film, None
+            film.close()
         try:
             self._restore_torque()       # full torque before the trip back to the start pose
         except Exception:  # noqa: BLE001
@@ -1076,6 +1422,20 @@ class StopReq(BaseModel):
     reason: Literal["stopped", "done"] | None = None   # "done": the voice side's camera check ended it
 
 
+class HoldReq(BaseModel):
+    action: Literal["open", "grip", "release", "take"]   # take: --dry only, pull the imaginary object out
+
+
+class FilmReq(BaseModel):
+    action: Literal["start", "stop"]
+    max_seconds: float | None = None
+
+
+class StallReq(BaseModel):
+    on: bool | None = None
+    test: str | None = None        # --dry only: react as if this joint had stalled
+
+
 def make_app(body, dry):
     @asynccontextmanager
     async def lifespan(app):
@@ -1150,6 +1510,28 @@ def make_app(body, dry):
     @app.post("/express")
     def express(req: ExpressReq):
         return body.ask(("express", req.kind.strip().lower()))
+
+    @app.post("/hold")
+    def hold(req: HoldReq):
+        if req.action == "take" and not dry:
+            raise HTTPException(400, "take is a --dry test of a hand pulling the object out")
+        return body.ask(("hold", req.action))
+
+    @app.post("/film")
+    def film(req: FilmReq):
+        return body.film(req.action, req.max_seconds)
+
+    @app.post("/stall")
+    def stall(req: StallReq):
+        if req.on is not None:
+            body.stall_on = req.on
+            log.info("stall protection %s", "on" if req.on else "OFF")
+        res = {"on": body.stall_on and not dry, "limits_deg": motions.STALL_DEG}
+        if req.test:
+            if not dry:
+                raise HTTPException(400, "test is for --dry: on the real arm, a stall has to be real")
+            res["test"] = body.ask(("stall_test", req.test.strip()))
+        return res
 
     photo_cascade, photo_lock = [], threading.Lock()
 
