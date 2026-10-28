@@ -35,7 +35,8 @@ export default function App() {
   const [robot, setRobot] = useState(null);
   const [robotErr, setRobotErr] = useState(null);
   const [llmReady, setLlmReady] = useState(false);
-  const [settings, setSettings] = useState({ lang: "auto", voice: "yaren", bargeIn: true, handsFree: true, speak: true });
+  const [settings, setSettings] = useState({ lang: "auto", voice: "yaren", bargeIn: true, handsFree: true, speak: true,
+    bodyLanguage: true, checkWork: true, angry: false });
   const [state, setState] = useState("idle");
   const [vad, setVad] = useState(false);
   const [msgs, setMsgs] = useState([]);
@@ -50,11 +51,14 @@ export default function App() {
   const [recOpen, setRecOpen] = useState(false);
   const [memOpen, setMemOpen] = useState(false);
   const [memVersion, setMemVersion] = useState(0);
+  const [timers, setTimers] = useState([]);   // {id, text, due (ms)}
+  const [now, setNow] = useState(Date.now());
 
   const ws = useRef(null);
   const mic = useRef(null);
   const player = useRef(null);
   const audioMeta = useRef(null);
+  const musicMeta = useRef(null);   // set by a "music" event: the next binary message is the dance beat
   const orb = useRef(null);
   const live = useRef({ micOn: true, ptt: false, handsFree: true });
   const chatEnd = useRef(null);
@@ -68,6 +72,12 @@ export default function App() {
 
   useEffect(() => { live.current = { micOn, ptt, handsFree: settings.handsFree }; }, [micOn, ptt, settings.handsFree]);
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [msgs]);
+  useEffect(() => {
+    if (!timers.length) return undefined;
+    const iv = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, [timers.length]);
+  const showTimers = useCallback((list) => setTimers((list || []).map((x) => ({ ...x, due: Date.now() + x.in_s * 1000 }))), []);
 
   // ---------------------------------------------------------------- websocket
   const onEvent = useCallback((ev) => {
@@ -78,6 +88,7 @@ export default function App() {
         if (ev.resumed && ev.transcript?.length) {
           setMsgs((ms) => (ms.length ? ms : ev.transcript.map((m) => ({ id: ++msgId, ...m, closed: true }))));
         }
+        showTimers(ev.timers);
         break;
       case "duck": player.current?.duck(ev.on); break;
       case "settings": setSettings((s) => ({ ...s, ...ev.settings })); break;
@@ -115,6 +126,13 @@ export default function App() {
       case "run_end": push({ role: "event", kind: "run_end", ...ev }); break;
       case "done_check": push({ role: "event", kind: "done_check", ...ev }); break;
       case "look": push({ role: "event", kind: "look", camera: ev.camera }); break;
+      case "music": musicMeta.current = ev; break;
+      case "music_stop": player.current?.stopMusic(); break;
+      case "photo": push({ role: "photo", name: ev.name, face: ev.face }); break;
+      case "plan": push({ role: "event", kind: "plan", ...ev }); break;
+      case "check": push({ role: "event", kind: "check", ...ev }); break;
+      case "timers": showTimers(ev.timers); break;
+      case "timer_fired": push({ role: "event", kind: "timer_fired", text: ev.text }); break;
       case "memory": setMemVersion((v) => v + 1); break;
       case "llm_stats":
         setPerf((p) => ({ ...p, first: ev.first_sentence_ms ?? p.first,
@@ -123,7 +141,7 @@ export default function App() {
       case "error": push({ role: "event", kind: "error", text: ev.message }); break;
       default: break;
     }
-  }, [push]);
+  }, [push, showTimers]);
 
   useEffect(() => {
     if (!awake || !TOKEN) return undefined;
@@ -141,12 +159,17 @@ export default function App() {
         if (ws.current !== sock) return;
         setConnected(false);
         player.current?.stop();
+        player.current?.stopMusic();
         if (!closed) retry = setTimeout(connect, 1500);
       };
       sock.onmessage = (e) => {
         lastMsg = Date.now();
         if (typeof e.data === "string") onEvent(JSON.parse(e.data));
-        else if (audioMeta.current) player.current?.play(new Int16Array(e.data), audioMeta.current.sr);
+        else if (musicMeta.current) {
+          const m = musicMeta.current;
+          musicMeta.current = null;
+          player.current?.playMusic(new Int16Array(e.data), m.sr, () => send({ type: "music_started" }));
+        } else if (audioMeta.current) player.current?.play(new Int16Array(e.data), audioMeta.current.sr);
       };
       ws.current = sock;
     };
@@ -182,7 +205,7 @@ export default function App() {
       document.removeEventListener("pointerdown", wakeAudio);
       ws.current?.close();
     };
-  }, [awake, onEvent]);
+  }, [awake, onEvent, send]);
 
   // Push the current settings whenever they change locally.
   const updateSettings = (patch) => {
@@ -276,10 +299,11 @@ export default function App() {
   const camName = robot?.cameras?.[0] || "wrist";
   const progress = robot?.state === "running" && robot.elapsed_s != null ? Math.min(1, robot.elapsed_s / robot.max_seconds) : 0;
   const motion = robot?.state === "moving" ? robot.motion : null;
+  const rec = robot?.recording;
   const shownState = vad && state !== "speaking" ? "listening" : state;
 
   return (
-    <div className="app">
+    <div className={`app ${settings.angry ? "angry" : ""}`}>
       <header>
         <Logo small />
         {/* narrow screens (phone/tablet): the big STOP scrolls away, so a copy stays in the header */}
@@ -343,6 +367,8 @@ export default function App() {
             <button className="ghost mem-btn" onClick={() => setMemOpen(true)}>🧠 {t.memory}</button>
             <label className="check"><input type="checkbox" checked={settings.bargeIn} onChange={(e) => updateSettings({ bargeIn: e.target.checked })} /> {t.bargeIn}</label>
             <label className="check"><input type="checkbox" checked={settings.speak} onChange={(e) => updateSettings({ speak: e.target.checked })} /> {t.speak}</label>
+            <label className="check"><input type="checkbox" checked={settings.bodyLanguage} onChange={(e) => updateSettings({ bodyLanguage: e.target.checked })} /> {t.bodyLanguage}</label>
+            <label className="check"><input type="checkbox" checked={settings.checkWork} onChange={(e) => updateSettings({ checkWork: e.target.checked })} /> {t.checkWork}</label>
           </div>
         </section>
 
@@ -367,6 +393,9 @@ export default function App() {
                 <div className="task-time">{robot.elapsed_s?.toFixed(0)} / {robot.max_seconds?.toFixed(0)} s</div>
               </div>
             )}
+            {rec && (
+              <div className="rec-chip"><i />{t.recording} · {rec.source === "leader" ? t.recLeader : t.recHand} · {rec.seconds.toFixed(1)} s</div>
+            )}
             {motion && (
               <div className="task-overlay">
                 <div className="task-text">{t.gestures[motion.name] || motion.name}</div>
@@ -381,7 +410,38 @@ export default function App() {
             )}
             {robot?.chunk_ms_last != null && <span>{t.chunk} {robot.chunk_ms_last} ms</span>}
             {robot && <span>{t.tick} p50 {robot.tick_ms_p50} ms</span>}
+            {robot?.health && (
+              <span className={robot.health.hot ? "hot" : robot.health.warm ? "warm" : ""} title={Object.entries(robot.health.temp_c).map(([k, v]) => `${k} ${v}°C`).join(" · ")}>
+                🌡 {robot.health.max_temp_c}°C / {robot.health.limit_c}°C
+              </span>
+            )}
           </div>
+          {(robot?.taught?.length > 0 || timers.length > 0) && (
+            <div className="extras">
+              {robot?.taught?.length > 0 && (
+                <div className="learned">
+                  <span className="label">🎓 {t.learned}</span>
+                  {robot.taught.map((m) => (
+                    <button key={m.name} className="ghost" title={`${m.seconds} s`} onClick={() => send({ type: "replay", name: m.name })}>▶ {m.name}</button>
+                  ))}
+                </div>
+              )}
+              {timers.length > 0 && (
+                <div className="timers">
+                  <span className="label">⏰ {t.timers}</span>
+                  {timers.map((x) => {
+                    const left = Math.max(0, Math.round((x.due - now) / 1000));
+                    return (
+                      <span key={x.id} className="timer">
+                        <b>{Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")}</b> {x.text}
+                        <button className="ghost" title={t.cancel} onClick={() => send({ type: "timer_cancel", id: x.id })}>✕</button>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
           <div className="actions">
             <button className="stop" onClick={stopAll} title={t.stopHint}>■ {t.stop} <small>{t.stopHint}</small></button>
             <button className="ghost" onClick={() => send({ type: "home" })}>⌂ {t.home}</button>
@@ -394,6 +454,8 @@ export default function App() {
               </label>
             )}
             <button className="ghost" onClick={() => { player.current?.stop(); send({ type: "hush" }); }}>🤫 {t.hush}</button>
+            <button className={`ghost angry-btn ${settings.angry ? "on" : ""}`} title={t.angryHint}
+              onClick={() => updateSettings({ angry: !settings.angry })}>{settings.angry ? "😡" : "😠"} {t.angry}</button>
           </div>
         </section>
 
@@ -435,13 +497,32 @@ function Message({ m, t }) {
   const moved = (r) => r?.moved != null ? ` · ${r.moved > 0 ? "+" : ""}${r.moved}${r.unit === "%" ? "%" : "°"}${r.limited_by ? ` (${r.limited_by})` : ""}` : "";
   if (m.role === "user") return <div className="msg user"><div className="bubble">{m.text}</div></div>;
   if (m.role === "assistant") return <div className="msg bot"><img src="/yaren.svg" alt="" /><div className="bubble">{m.text}</div></div>;
+  if (m.role === "photo") {
+    const src = `/api/photos/${m.name}?token=${encodeURIComponent(TOKEN)}`;
+    return (
+      <div className="msg photo">
+        <a href={src} target="_blank" rel="noreferrer"><img src={src} alt={t.photo} /></a>
+        <a className="dl" href={src} download={`yaren-${m.name}`}>⬇ {t.download}</a>
+      </div>
+    );
+  }
   if (m.role === "tool") {
-    const icon = { do_task: "🦾", stop_robot: "■", go_home: "⌂", look: "👁", robot_status: "ℹ", remember: "🧠", forget: "🗑", gesture: "👋", move_part: "↕", hand_guide: "✋" }[m.name] || "⚙";
+    const icon = { do_task: "🦾", stop_robot: "■", go_home: "⌂", look: "👁", robot_status: "ℹ", remember: "🧠", forget: "🗑", gesture: "👋", move_part: "↕", hand_guide: "✋",
+      teach: "🎓", replay: "▶", mirror: "🪞", follow_face: "🙂", dance: "💃", take_photo: "📷", health_check: "🌡", timer: "⏰", run_plan: "📋" }[m.name] || "⚙";
+    const a = m.args || {};
+    const r = m.result || {};
     const detail = m.name === "do_task" ? `“${m.args?.instruction}”${m.result?.trained_skill === false ? " · untrained" : ""}`
       : m.name === "remember" ? `“${m.args?.fact}”` : m.name === "forget" ? `“${m.result?.forgotten ?? m.args?.id}”`
       : m.name === "gesture" ? (t.gestures[m.args?.name] || m.args?.name || "")
       : m.name === "move_part" ? `${m.args?.part} ${m.args?.direction}${moved(m.result)}`
-      : m.name === "hand_guide" ? (m.args?.on ? "on" : "off") : "";
+      : m.name === "hand_guide" ? (m.args?.on ? "on" : "off")
+      : m.name === "teach" ? `${a.action}${a.using ? ` · ${a.using}` : ""}${a.name ? ` “${a.name}”` : ""}${r.seconds != null ? ` · ${r.seconds} s` : ""}`
+      : m.name === "replay" ? `“${a.name}”${a.speed ? ` ×${a.speed}` : ""}`
+      : m.name === "mirror" || m.name === "follow_face" ? (a.on === false ? "off" : "on")
+      : m.name === "dance" ? `${a.tempo || "medium"}${r.dance_s ? ` · ${r.dance_s} s` : ""}`
+      : m.name === "health_check" ? (r.verdict ? `${r.verdict} · ${r.max_temp_c}°C` : "")
+      : m.name === "timer" ? (a.action === "set" ? `${a.minutes ? `${a.minutes} min ` : ""}${a.seconds ? `${a.seconds} s ` : ""}“${a.text || ""}”` : a.action)
+      : m.name === "run_plan" ? `${(r.steps || a.steps || []).join(" → ")}${a.repeat > 1 ? ` ×${a.repeat}` : ""}${a.while ? ` · ${a.while}` : ""}` : "";
     const err = m.result?.error ? ` · ${m.result.error}` : "";
     return <div className="msg tool">{icon} {m.name} {detail}{err}</div>;
   }
@@ -449,6 +530,13 @@ function Message({ m, t }) {
   if (m.kind === "done_check") return <div className="msg event faint">👁 {m.answer === "yes" ? `✓ ${m.streak}` : "…"}</div>;
   if (m.kind === "look") return <div className="msg event faint">👁 {m.camera}</div>;
   if (m.kind === "error") return <div className="msg event err">⚠ {m.text}</div>;
+  if (m.kind === "plan") {
+    if (m.ended) return <div className="msg event">📋 {t.planEnded}: {m.ended}</div>;
+    if (m.check) return <div className="msg event faint">📋 {m.round}. ❓ {m.check} → {m.answer ? t.yes : t.no}</div>;
+    return <div className="msg event faint">📋 {m.round}.{m.step}/{m.of} · {m.text}</div>;
+  }
+  if (m.kind === "check") return <div className={`msg event ${m.verdict === "success" ? "ok" : m.verdict === "fail" ? "err" : ""}`}>🔍 {t.verdict[m.verdict] || m.verdict}</div>;
+  if (m.kind === "timer_fired") return <div className="msg event ok">⏰ {t.timeUp}: {m.text}</div>;
   return null;
 }
 

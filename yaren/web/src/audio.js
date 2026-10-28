@@ -120,6 +120,40 @@ export class Player {
     if (had) this.onPlaying(false);
   }
 
+  // A dance beat: not her voice, so it is never ducked, never stopped by audio_stop and never counts as
+  // her speaking. onStart fires when its first sample should be audible: the arm starts dancing then.
+  playMusic(int16, sampleRate, onStart) {
+    this.stopMusic();
+    if (!this.musicGain) {
+      this.musicGain = this.ctx.createGain();
+      this.musicGain.gain.value = 0.7;
+      this.musicGain.connect(this.ctx.destination);
+    }
+    const buf = this.ctx.createBuffer(1, int16.length, sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < int16.length; i++) ch[i] = int16[i] / 32768;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(this.musicGain);
+    const at = this.ctx.currentTime + 0.05;
+    src.start(at);
+    this.music = src;
+    src.onended = () => { if (this.music === src) this.music = null; };
+    const latency = this.ctx.outputLatency || this.ctx.baseLatency || 0;
+    setTimeout(onStart, Math.max(0, (at - this.ctx.currentTime + latency) * 1000));
+  }
+
+  stopMusic() {
+    if (!this.music) return;
+    this.music.onended = null;
+    try {
+      this.music.stop();
+    } catch {
+      /* already stopped */
+    }
+    this.music = null;
+  }
+
   level() {
     if (this.sources.size === 0) return 0;
     this.analyser.getByteTimeDomainData(this.data);
