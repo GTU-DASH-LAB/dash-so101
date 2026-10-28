@@ -17,6 +17,7 @@ STOP ends it at once (the servos hold the last command). Pure numpy: test_motion
 gesture and part move offline, no robot needed.
 """
 
+import collections
 import math
 
 import numpy as np
@@ -579,3 +580,117 @@ def track_step(pose, ex, ey, dt, sx=1, sy=1):
     p = clamp(p)
     p["wrist_flex"] = min(max(p["wrist_flex"], TRACK_WRIST[0]), TRACK_WRIST[1])
     return p
+
+
+# ---------------------------------------------------------------- stall protection
+# A joint that cannot get where it is sent: the goal of the last tick minus the position measured now keeps
+# one sign, beyond STALL_DEG, for a whole STALL_WINDOW while the joint moves less than STALL_STILL_DEG. In the
+# 100 demonstrations of so101_pen_in_bowl_wrist (65,450 tick pairs; goal = the leader arm's position) the
+# largest error a joint held for 0.2 s while moving less than 1 deg - carrying its weight, pressing the pen
+# onto the table - was pan 2.0, lift 6.1, elbow 4.3, wrist flex 2.4, roll 1.9 deg. A stall is 1.5x that, and
+# at least 2 deg more. Lag is no stall: up to 20 deg held for 0.2 s in the demonstrations, all while moving.
+# The gripper is left out: squeezing what it holds is its job, and lerobot caps its torque at 50 %.
+STALL_STILL_MAX = {"shoulder_pan": 2.02, "shoulder_lift": 6.11, "elbow_flex": 4.26, "wrist_flex": 2.37,
+                   "wrist_roll": 1.89}
+STALL_DEG = {j: round(max(1.5 * v, v + 2.0), 1) for j, v in STALL_STILL_MAX.items()}
+STALL_WINDOW = 6                  # ticks: 0.2 s at 30 fps
+STALL_STILL_DEG = 1.0
+
+
+class StallWatch:
+    """Fed every tick the arm is driven: the goal it was sent last tick and the position measured now."""
+
+    def __init__(self, limits=None, window=STALL_WINDOW):
+        self.limits = dict(limits or STALL_DEG)
+        self.window = window
+        self.hist = {j: collections.deque(maxlen=window) for j in self.limits}
+
+    def reset(self):
+        for d in self.hist.values():
+            d.clear()
+
+    def step(self, goal, present):
+        """(joint, error) of the most blocked joint (error = goal - position, degrees), or None."""
+        worst = None
+        for j, lim in self.limits.items():
+            if j not in goal or j not in present:
+                continue
+            d = self.hist[j]
+            d.append((goal[j] - present[j], present[j]))
+            if len(d) < self.window or abs(d[-1][1] - d[0][1]) >= STALL_STILL_DEG:
+                continue
+            errs = [e for e, _ in d]
+            if (all(e > lim for e in errs) or all(e < -lim for e in errs)) and \
+                    (worst is None or abs(errs[-1]) / lim > abs(worst[1]) / self.limits[worst[0]]):
+                worst = (j, errs[-1])
+        return worst
+
+
+def plan_backoff(start, joint, error):
+    """After a stall: the blocked joint moves back, away from what it pushed against, by its stall limit -
+    calmly, inside the joint limits and never closer to the table (shortened, like plan_move). None when
+    there is no room for at least a degree."""
+    S = {j: float(start[j]) for j in JOINTS}
+    want = -math.copysign(STALL_DEG.get(joint, 3.0), error)
+    full = min(max(S[joint] + want, LIMITS[joint][0]), LIMITS[joint][1]) - S[joint]
+    if full * want <= 0:
+        return None
+
+    def plan(f):
+        return Plan("back off", S, [_kf({joint: S[joint] + f * full}, speeds=GENTLE)],
+                    {"joint": joint, "moved": round(f * full, 1)})
+
+    lo = 1.0
+    if plan(1.0).lowest():
+        lo, hi = 0.0, 1.0
+        for _ in range(12):
+            mid = (lo + hi) / 2
+            if plan(mid).lowest():
+                hi = mid
+            else:
+                lo = mid
+    return plan(lo) if abs(lo * full) >= 1.0 else None
+
+
+# ---------------------------------------------------------------- third hand: hold what is put in the gripper
+# Grip: close calmly until the gripper stops short of its goal - something is in it - then keep the goal
+# GRIP_SQUEEZE below where it stopped: the squeeze that held the pen in the demonstrations (goal minus position
+# while holding still: median -6.6 %, p10..p90 -6.8..-6.5, 16,011 windows of 0.2 s; in all of them the leader
+# was closed all the way). Closed all the way without stopping: the hand was empty. Holding, and the position
+# comes down to the goal: the object was taken out.
+GRIP_SPEED = GENTLE["gripper"]    # %/s
+GRIP_SQUEEZE = 6.6
+GRIP_CONTACT = 2.0                # % short of the goal for a whole window, while still: touching something
+GRIP_GONE = 2.0                   # % from the goal for a whole window while holding: nothing in the hand
+GRIP_MIN_OPEN = 10.0              # grip refuses to start more closed than this: nothing can be put in
+
+
+class Grip:
+    """step(position) -> (goal, event) every tick; event "contact" (now holding), "empty", "gone" or None."""
+
+    def __init__(self, start, dt=1 / 30):
+        self.goal = float(start)
+        self.dt = dt
+        self.state = "closing"
+        self.contact = None
+        self.hist = collections.deque(maxlen=STALL_WINDOW)
+
+    def step(self, pos):
+        self.hist.append((self.goal, float(pos)))
+        full = len(self.hist) == self.hist.maxlen
+        still = full and abs(self.hist[-1][1] - self.hist[0][1]) < STALL_STILL_DEG
+        lo = LIMITS["gripper"][0]
+        if self.state == "closing":
+            if still and all(p - g > GRIP_CONTACT for g, p in self.hist):
+                self.state, self.contact = "holding", float(pos)
+                self.goal = max(lo, float(pos) - GRIP_SQUEEZE)
+                self.hist.clear()
+                return self.goal, "contact"
+            if self.goal <= lo and still and pos - self.goal <= GRIP_CONTACT:
+                self.state = "empty"
+                return self.goal, "empty"
+            self.goal = max(lo, self.goal - GRIP_SPEED * self.dt)
+        elif self.state == "holding" and full and all(p - g < GRIP_GONE for g, p in self.hist):
+            self.state = "gone"
+            return self.goal, "gone"
+        return self.goal, None

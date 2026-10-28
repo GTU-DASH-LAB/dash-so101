@@ -268,6 +268,119 @@ def test_follow_and_track():
     assert p == M.clamp(dict(up)) or all(abs(p[j] - up[j]) < 1e-9 for j in M.JOINTS)   # deadband
 
 
+DEMOS = Path.home() / ".cache/huggingface/lerobot/fouad1233/so101_pen_in_bowl_wrist"
+
+
+def servo(pos, goal, speed, obstacle=None):
+    """A position servo for the tests: towards the goal at most `speed` per tick, stopped by an obstacle
+    (the lowest position it can reach)."""
+    pos += max(-speed, min(speed, goal - pos))
+    return max(pos, obstacle) if obstacle is not None else pos
+
+
+def test_stall_watch_never_fires_on_the_demonstrations():
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        print("  (skipped: needs pyarrow - run with the lelab python)")
+        return
+    files = sorted(DEMOS.glob("data/*/*.parquet"))
+    if not files:
+        print("  (skipped: so101_pen_in_bowl_wrist not downloaded)")
+        return
+    import numpy as np
+    tab = [pq.read_table(f, columns=["episode_index", "frame_index", "action", "observation.state"]).to_pydict()
+           for f in files]
+    rows = sorted(zip(*[sum((d[k] for d in tab), []) for k in ("episode_index", "frame_index", "action",
+                                                                 "observation.state")]))
+    fired, n = [], 0
+    for ep in sorted({r[0] for r in rows}):
+        a = np.array([r[2] for r in rows if r[0] == ep])
+        s = np.array([r[3] for r in rows if r[0] == ep])
+        w = M.StallWatch()
+        for k in range(1, len(a)):
+            hit = w.step(dict(zip(M.JOINTS, a[k - 1])), dict(zip(M.JOINTS, s[k])))
+            n += 1
+            if hit:
+                fired.append((ep, k, hit))
+    assert not fired, fired[:5]
+    assert n > 60000
+
+
+def test_stall_watch_catches_a_blocked_joint():
+    w = M.StallWatch()
+    pose = dict(STANDING)
+    # the elbow is sent onward 2 deg a tick but stays where it is: fires once the window is full
+    hits = []
+    for k in range(1, 20):
+        goal = dict(pose, elbow_flex=pose["elbow_flex"] + 2.0 * k)
+        hits.append(w.step(goal, pose))
+    first = next(i for i, h in enumerate(hits) if h)
+    assert hits[first][0] == "elbow_flex" and hits[first][1] > M.STALL_DEG["elbow_flex"]
+    assert first <= M.STALL_WINDOW + 4
+    # lag while moving (the joint follows, 8 deg behind) and a steady error at the demos' size: never
+    w = M.StallWatch()
+    for k in range(60):
+        goal = dict(pose, shoulder_lift=pose["shoulder_lift"] + 2.0 * k)
+        now = dict(pose, shoulder_lift=pose["shoulder_lift"] + 2.0 * k - 8.0,
+                   elbow_flex=pose["elbow_flex"] - M.STALL_STILL_MAX["elbow_flex"])
+        assert w.step(dict(goal, elbow_flex=pose["elbow_flex"]), now) is None
+    # the gripper squeezing a pen is not a stall
+    w = M.StallWatch()
+    for k in range(30):
+        assert w.step(dict(pose, gripper=0.0), dict(pose, gripper=7.1)) is None
+
+
+def test_backoff():
+    # pushed down onto something from standing: back up by the stall limit
+    up = M.plan_pose("portrait", REST).end
+    b = M.plan_backoff(up, "shoulder_lift", +10.0)
+    assert b is not None and abs(b.summary["moved"] + M.STALL_DEG["shoulder_lift"]) < 0.05
+    assert b.lowest() is None and b.seconds >= M.MIN_MOVE_S
+    for joint in M.STALL_DEG:
+        for err in (-12.0, 12.0):
+            for start in (REST, REACH, STANDING, up):
+                b = M.plan_backoff(start, joint, err)
+                if b is None:
+                    continue
+                assert b.summary["moved"] * err < 0               # away from the push
+                assert abs(b.summary["moved"]) <= M.STALL_DEG[joint] + 1e-6
+                assert b.lowest() is None                         # never closer to the table
+                for p in samples(b):
+                    assert all(M.LIMITS[j][0] - 1e-6 <= p[j] <= M.LIMITS[j][1] + 1e-6 for j in M.LIMITS)
+
+
+def test_grip():
+    v = M.LIVELY["gripper"] * DT
+    # something 20 % wide in a hand opened to 45 %: contact, then held 6.6 % tighter than where it stopped
+    g, pos, events = M.Grip(45.0), 45.0, []
+    for _ in range(90):
+        goal, ev = g.step(pos)
+        events.append(ev)
+        pos = servo(pos, goal, v, obstacle=20.0)
+    assert events.count("contact") == 1 and g.state == "holding"
+    assert abs(g.contact - 20.0) < 0.5 and abs(g.goal - (g.contact - M.GRIP_SQUEEZE)) < 1e-9
+    # held steadily...
+    for _ in range(60):
+        goal, ev = g.step(pos)
+        assert ev is None
+        pos = servo(pos, goal, v, obstacle=20.0)
+    # ...until it is taken out: the gripper closes onto its goal
+    events = []
+    for _ in range(30):
+        goal, ev = g.step(pos)
+        events.append(ev)
+        pos = servo(pos, goal, v)
+    assert "gone" in events and g.state == "gone"
+    # an empty hand closes all the way
+    g, pos, events = M.Grip(45.0), 45.0, []
+    for _ in range(120):
+        goal, ev = g.step(pos)
+        events.append(ev)
+        pos = servo(pos, goal, v)
+    assert events.count("empty") == 1 and "contact" not in events and g.state == "empty"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
