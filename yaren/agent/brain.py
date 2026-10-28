@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from .ears import Segmenter
-from .film import Soundtrack, clip_name, finish_clip
+from .film import CLIPS, Soundtrack, clip_name, finish_clip
 from .trials import MAX_TRIALS, TestRun
 from .trials import answer as test_answer
 from .voice import guess_lang
@@ -1513,8 +1513,10 @@ class Session:
             raw = await self.hub.body.film("stop")
             if not raw.get("ok"):
                 raise RuntimeError(raw.get("error") or "no picture")
+            dry = bool((self.hub.robot_status or {}).get("dry"))     # replayed footage: kept apart
             name = await finish_clip(raw, f["track"], clip_name(raw.get("t0"), f["kind"], label),
-                                     {"kind": f["kind"], "label": label, **(meta or {})})
+                                     {"kind": f["kind"], "label": label, "dry": dry, **(meta or {})},
+                                     CLIPS / "dry" if dry else CLIPS)
         except Exception as e:  # noqa: BLE001
             log.warning("clip failed: %s", e)
             self.send(type="error", message=f"clip: {e}")

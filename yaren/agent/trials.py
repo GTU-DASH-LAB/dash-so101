@@ -16,7 +16,7 @@ import re
 import time
 from pathlib import Path
 
-from .film import relabel
+from .film import CLIPS, relabel
 
 log = logging.getLogger("yaren.trials")
 TESTS = Path(__file__).resolve().parent.parent / "run" / "tests"
@@ -187,7 +187,7 @@ class TestRun:
         if filming:
             res["clip"] = await s.film_stop("trial", label, {**meta, "success": ok, "camera": cam})
         elif clip:
-            res["clip"] = relabel(clip, "success" if ok else "fail")
+            res["clip"] = relabel(clip, "success" if ok else "fail", CLIPS / "dry" if self.dry else CLIPS)
             s.send(type="clip", name=res["clip"], kind="trial", label=label, seconds=None)
         k = sum(r["success"] for r in self.results)
         log.info("test trial %d: %s (camera %s), %d/%d", i, "success" if ok else "fail", cam, k, len(self.results))

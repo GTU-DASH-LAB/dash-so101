@@ -307,6 +307,8 @@ def make_app(hub, token):
     def clip(name: str, request: Request):
         check(req_token(request))
         f = CLIPS / name
+        if not f.is_file():
+            f = CLIPS / "dry" / name          # clips of --dry runs are kept apart
         if not re.fullmatch(r"\d{8}-\d{6}_[a-z]+(_[0-9a-z_]+)?(-\d+)?\.mp4", name) or not f.is_file():
             raise HTTPException(404, "no such clip")
         return FileResponse(f, media_type="video/mp4")

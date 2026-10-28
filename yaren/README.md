@@ -406,7 +406,8 @@ web/              React 19 + Vite app (npm run build → web/dist, served by age
 run/              runtime state, git-ignored: pids, logs, token, TLS cert, recorded voices, memory/,
                   motions/ (taught movements; motions_dry/ for --dry, never replayed on the arm), photos/,
                   film/ (picture-only clips being filmed), tests/ (test-mode results, *_dry.json from --dry)
-videos_for_editing/  finished clips with sound, <time>_<run|trial|film>_<label>.mp4 + .json (git-ignored)
+videos_for_editing/  finished clips with sound, <time>_<run|trial|film>_<label>.mp4 + .json (git-ignored);
+                  clips of --dry runs (replayed footage) go to videos_for_editing/dry/
 ```
 
 ## Troubleshooting
