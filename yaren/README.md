@@ -93,6 +93,10 @@ Just ask, in Turkish or English. The examples are what was tested; other wording
 | "motorların ısındı mı?" | `health_check` | motor temperatures against each servo's own limit, and the voltage |
 | "10 dakika sonra bana çayı hatırlat" | `timer` | she tells you (and waves) when it is up; the ⏰ row shows the countdowns |
 | "önce selam ver, sonra dans et", "masadaki bütün kalemleri kaseye koy" | `run_plan` | several steps in a row, repeated while a camera check from above says YES |
+| "bunu tutar mısın?" … "tamam, koydum" … "geri ver" | `hold` | third hand: opens, then closes gently until it feels the thing and holds it as firmly as it held the pen in the demos; "give back" opens (the ✊ button too). No task while holding |
+| "bunu çek", "çekimi bitir" | `film` | films the wrist camera with both voices into `videos_for_editing/`; the clip plays in the chat. With **Film every run** on, every task run is filmed by itself, labelled `success` / `fail` / … |
+| "10 deneme yap", "run 20 trials" | `test` | test mode: the pen task again and again (max 30). After each trial she looks from above, asks "sen ne dersin?", and **your** answer scores it ("evet"/"oldu" ↔ "hayır"/"olmadı", or the ✓/✗ buttons); then you put the pen back and say "hazır". Score card in the app, one clip per trial, results in `run/tests/` |
+| (nothing - always on) | stall protection | a joint that stops short of its goal by more than the demos ever did ends whatever moved it, backs off a little and holds; she tells you and asks if everyone is okay |
 
 Switches and buttons:
 
@@ -103,6 +107,33 @@ Switches and buttons:
 * **😠 Sinirli mod / Angry mode**: she grumbles, roasts you, swears a little ("Bir sigara yakmadığım
   kaldı", "Senin yapacağın işi seveyim") and her voice gets more dramatic. Stopping, tools and honesty
   work exactly as before.
+* **Film every run** (on): each task run becomes a clip; **🎬 Film** films on demand (up to 5 min).
+* **Stall protection** (on; off and greyed out in `--dry`, where replayed joints never follow commands).
+* **🧪 Test** with a number: starts test mode; the card shows each trial as a dot, ✓ Oldu / ✗ Olmadı
+  while she asks, ▶ when the pen is back, and the final score with how often the camera agreed.
+
+### Stall protection: where the limits come from
+
+A joint is stalled when the goal it was sent last tick minus where it is now keeps one sign beyond a
+limit for 0.2 s while it moves less than 1°. The limits are from the 100 demonstrations of
+`so101_pen_in_bowl_wrist` (65,450 tick pairs, goal = the leader's position): the largest error a joint
+held for 0.2 s while still - carrying its weight, pressing the pen onto the table - was pan 2.0,
+lift 6.1, elbow 4.3, wrist flex 2.4, roll 1.9°. A stall is 1.5× that and at least 2° more: **pan 4.0,
+lift 9.2, elbow 6.4, wrist flex 4.4, roll 3.9°**. Run over all 100 demonstrations, the watch never
+fires (`test_motions.py`). Lag while moving (up to 20° in the demos) is not a stall. The gripper is not
+watched: squeezing is its job, and lerobot caps its torque at 50 %. After a stall, a run ends
+`blocked`, the joint moves back by its limit (never closer to the table) and the arm holds; it never
+goes home, because something or someone is in the way. Each stall is logged in `run/robot.log` with
+the motors' `Present_Load`, which is data for tuning the limits on the real arm.
+
+### The third hand's grip
+
+Grip closes at the demos' calm gripper speed until the gripper stops short of its goal for 0.2 s: that
+is where the object is. It then keeps the goal 6.6 % below that point. That is the squeeze that held
+the pen in the demos (goal − position while holding still: median −6.6 %, p10–p90 −6.8…−6.5 %, 16,011
+windows). Closed all the way, or stopped below 3 % (the empty gripper rests at 1.2–1.4 %), means
+nothing was in it. If the position later comes down to the goal, the object was taken out, and she
+says so.
 
 What this does not change: MolmoAct2 was trained on **one** task. A plan chains the things she can do;
 it does not teach the policy anything new, and an untrained `task:` step is still only a try.
@@ -251,14 +282,21 @@ exactly: same preprocessing, action interpolation, `--robot.max_relative_target`
 * The leader arm (for `mirror` and teaching with it) is found by `LEADER_SERIAL` in the policy
   folder's `config.env` and connected without the calibration prompt; `--dry` replays the episode's
   actions instead.
+* `POST /hold {open|grip|release}` (the third hand), `POST /film {start|stop}` (the camera into
+  `run/film/*.mp4` through ffmpeg in its own thread; frames are repeated or skipped to keep wall-clock
+  time, so the voice server's soundtrack lines up), `POST /stall {on, test}` (stall protection on/off;
+  `test` exists in `--dry` only and fakes the reaction for a joint).
+* Every command goes through one wrapper around the robot's `send_action`. It records the goal really
+  sent (after `max_relative_target`) for the stall watch, and keeps a holding gripper on its object.
 * `GET /status` (with the last 10 run results, which the voice server logs into memory, plus
-  `at_home`, `near_pose`, `recording`, `taught`, `face`, `health`), `/camera/<name>.jpg|.mjpg`
-  (`?upright=1` turns a photo so a face in it stands upright).
+  `at_home`, `near_pose`, `recording`, `taught`, `face`, `health`, `stall`, `hold`, `film`),
+  `/camera/<name>.jpg|.mjpg` (`?upright=1` turns a photo so a face in it stands upright).
 * Warm-up runs two throwaway action chunks before the server reports ready (the first one took 300 ms
   cold), and **sends no action** to the arm.
 * `--dry`: the robot is replaced by a recorded episode (`--dry-episode`, default 95). Camera frames
   and joint states are real data, and actions are only counted. Everything else, including the GPU
-  inference, is real.
+  inference, is real. The gripper is simulated once `/hold` is used: an imaginary object 20 % wide,
+  and `/hold take` pulls it out.
 
 It listens on 127.0.0.1 only; the voice server is its only client. `rollout_running()` in every
 policy folder's `lib.sh` counts it as a rollout, so recording/rollout scripts won't start while Yaren
@@ -273,9 +311,9 @@ python3 test_motions.py                     # motion planning: table clearance, 
 ~/envs/yaren/bin/python selftest.py         # 9 spoken lines (Turkish + English), real ASR → LLM → TTS
 ```
 
-Last selftest run (2026-10-28, dry, with all 19 tools): all 9 lines did what they should (chat, the
-trained task, the "Dur!" fast path, look, an untrained task, go home, facts, the hello gesture,
-"ağzını aç"), first audio 1.4–3.1 s after the end of speech.
+Last selftest run (2026-10-28 evening, dry, with all 22 tools): all 9 lines did what they should (chat,
+the trained task, the "Dur!" fast path, look, an untrained task, go home, facts, the hello gesture,
+"ağzını aç"), first audio 1.4–3.5 s after the end of speech (1.4–3.1 s with 19 tools that morning).
 
 The new tools, typed over the WebSocket against `--dry` on 2026-10-28:
 * teach (by hand) → saved as "selam"; replay → refused, because the dry episode's pose would take the
@@ -289,9 +327,25 @@ The new tools, typed over the WebSocket against `--dry` on 2026-10-28:
   without a face → stopped by itself after 30 s; mirroring with the dry leader; "dur" ended it.
 * the echo / barge-in / reconnect test from the morning: unchanged.
 
-**Not tested on the real arm**: teaching, replay, mirroring, face following, the survey look, the dance
-and body language ran only in `--dry`. The look-from-above check is measured on dataset frames only
-(19/19 "pen on the table", 18/18 "pen in the bowl"), not on views after real runs.
+Stall protection, the third hand, filming and test mode, against `--dry` on 2026-10-28 (typed):
+* "şu kalemi tutar mısın?" → `hold open`; "tamam, koydum" → `hold grip` → holding (simulated object at
+  20 %, goal 13.4 %) in 0.9 s; a task was refused while holding, a nod kept the grip; "geri ver" → open.
+* "bunu çek" … "çekimi bitir" → a 15.0 s clip (H.264 + AAC) whose sound has her two sentences where
+  she said them (speech at 1.3–3.7 s and from 7.9 s).
+* pen task with **Film every run** → `..._run_success.mp4` (39 s, labelled by the look from above).
+* a faked elbow stall during "hello" → the gesture ended, the elbow backed off 6.4°, and she said "Aman,
+  dirseğim bir şeye takıldı ve durdum, kimse zarar görmüş değil mi?"
+* "iki deneme yap" → two trials; trial 1 answered "Evet oldu" by voice, 16 s late (the clip ended 12 s
+  after her question and was renamed `_success` when the answer came); trial 2 answered with the ✗
+  button; score 1/2 saved in `run/tests/`, and the summary named each trial.
+* the selftest (9/9) and the older tools (teach, replay, plan, dance, "dur") again: unchanged.
+
+**Not tested on the real arm**: stall protection (real detection only runs on the real arm; its limits
+come from the demos and are logged on every stall for checking), the third hand's grip on a real object,
+teaching, replay, mirroring, face following, the survey look, the dance and body language ran only in
+`--dry`. The look-from-above check is measured on dataset frames only (19/19 "pen on the table", 18/18
+"pen in the bowl"), not on views after real runs; test mode records both for every trial, which will
+measure it.
 
 `selftest.py` synthesizes test sentences in a *different* voice, streams them in real time like a
 microphone, and prints what Yaren heard, which tools she called, what she said, and the latencies.
@@ -346,9 +400,13 @@ agent/
   memory.py       long-term memory: people.md, notes.md, runs.jsonl
   body.py         client for robot_server.py
   music.py        the dance beat (numpy synth, in step with the dance plan)
+  film.py         clips: the soundtrack (her voice as sent, the microphone, the beat) muxed onto the camera
+  trials.py       test mode: trials, verdicts (short answers settle without the LLM), scores
 web/              React 19 + Vite app (npm run build → web/dist, served by agent/server.py)
 run/              runtime state, git-ignored: pids, logs, token, TLS cert, recorded voices, memory/,
-                  motions/ (taught movements; motions_dry/ for --dry, never replayed on the arm), photos/
+                  motions/ (taught movements; motions_dry/ for --dry, never replayed on the arm), photos/,
+                  film/ (picture-only clips being filmed), tests/ (test-mode results, *_dry.json from --dry)
+videos_for_editing/  finished clips with sound, <time>_<run|trial|film>_<label>.mp4 + .json (git-ignored)
 ```
 
 ## Troubleshooting

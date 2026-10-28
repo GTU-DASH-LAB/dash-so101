@@ -404,6 +404,18 @@ narrower x4 PCIe link. Nothing about 78GB/113GB/`free -h` transfers. Re-measure.
   folder's `config.env`; calibration `calibration/teleoperators/so_leader/dash_so101.json`.
 - In `--dry` the joints replay a recorded episode in a loop, so `at_home` only flickers and "stand up to
   chat" cannot be tested there; `posture_step` is unit-tested in `test_agent.py` instead.
+- **Stall protection** (`motions.StallWatch`, wired in `robot_server.py`) uses limits from the demos'
+  tracking error (1.5x the largest error a still joint held for 0.2 s; never fires on any of the 100
+  demos). It is off in `--dry`: replayed joints never follow commands, so every move would look stalled.
+  Test the reaction there with `POST /stall {"test": "<joint>"}`. Every command passes the
+  `send_action` wrapper in `Body._wrap_send`; keep it that way, since the stall watch and the third
+  hand's grip both depend on it.
+- Dry tests with the LLM write to Yaren's **real** memory unless `MEMORY_DIR` points elsewhere: on
+  2026-10-28 a dry teach test saved "Fouad taught Yaren a movement named selam" (deleted). Export
+  `MEMORY_DIR` to a scratch folder before `./start.sh --dry` for tests.
+- Test mode's spoken questions must not contain the answer words (`agent/trials.py`): an answer said
+  while she still talks goes through the echo check, and "oldu" right after "Sence oldu mu?" is dropped
+  as her echo. `test_agent.py` checks this.
 - Warming Ollama with the session's system prompt does **not** speed up the first turn with
   qwen3.8 on Ollama 0.40.9: only a request that extends the previous one reuses the cache. Measured
   ~400 ms prefill for 1,666 tokens either way, ~155 ms for follow-up turns. Rerun `yaren/selftest.py` against `./start.sh --dry` after changing the
